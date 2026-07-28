@@ -1,0 +1,38 @@
+[package]
+name = "cafft"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Common Additive Fast Fourier Transform: shared additive-FFT engine over binary fields"
+repository = "https://github.com/nanithefkuc/cafft"
+license = "MIT"
+readme = "README.md"
+keywords = ["galois", "finite-field", "fft", "erasure", "reed-solomon"]
+categories = ["algorithms", "mathematics", "no-std"]
+exclude = ["/.github", "/.plans", "/benchmarks"]
+
+[features]
+default = ["std", "simd"]
+# Standard library. Required for runtime CPU feature detection and the
+# shared transform-plan caches.
+std = ["fff/std"]
+# Runtime-dispatched SIMD butterfly kernels (GFNI/AVX2/SSSE3 on x86, NEON on
+# AArch64). Disabling leaves the portable scalar backend.
+simd = ["std", "fff/simd"]
+# RS-facing erasure algebra: locator evaluation, Forney-style recovery,
+# systematic-locator caches, strip-blocked encode skeletons.
+rs = ["std"]
+# Expose unstable implementation APIs for experimentation and downstream
+# tuning. Exempt from this crate's compatibility guarantees.
+internals = []
+
+[dependencies]
+fff = { git = "https://github.com/nanithefkuc/fff.git" }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,25 @@
+[package]
+name = "cafft-afft-bench"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[workspace]
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+cafft = { path = "../.." }
+additive-fft-reed-solomon = { git = "https://github.com/vkomenda/additive-fft-reed-solomon", rev = "f1bcc91102b74f860c93dcf0b75887ff85755564", features = ["compile_gfni"] }
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+fff = { git = "https://github.com/nanithefkuc/fff.git" }
+
+[[bench]]
+name = "raw_afft"
+harness = false
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
