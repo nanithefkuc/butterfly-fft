@@ -225,6 +225,10 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     pub fn basis(&self) -> &[F::Elem] {
         &self.basis
     }
+    /// Coefficients of `W̄_dimension`, low Frobenius exponent first.
+    pub(crate) fn normalized_subspace_polynomial(&self, dimension: usize) -> &[F::Elem] {
+        &self.table.polynomials[dimension].normalized_coefficients
+    }
 
     /// The plan's twiddle and derivative tables.
     ///

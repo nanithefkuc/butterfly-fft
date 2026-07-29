@@ -9,6 +9,10 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use cafft::basis::{
+    conversion_scratch_elements, monomial_to_novel_bytes, monomial_to_novel_with_scratch,
+    novel_to_monomial_bytes, novel_to_monomial_with_scratch,
+};
 use cafft::core::transform::TransformPlan;
 use fff::{Gf8, Gf16};
 
@@ -60,6 +64,8 @@ fn check_field<F: cafft::core::kernel::ButterflyKernels>(log_size: usize, row_le
     let mut derivative = vec![0u8; rows.len()];
     let mut values = vec![F::Elem::default(); plan.size()];
     let mut element_derivative = vec![F::Elem::default(); plan.size()];
+    let mut conversion_scratch = vec![F::Elem::default(); conversion_scratch_elements(plan.size())];
+    let mut conversion_byte_scratch = vec![0u8; conversion_scratch_elements(plan.size()) * row_len];
 
     // Warm the process-wide backend detection and any lazy state before
     // arming, so what is measured is the transform itself.
@@ -74,6 +80,10 @@ fn check_field<F: cafft::core::kernel::ButterflyKernels>(log_size: usize, row_le
         plan.forward(&mut values).unwrap();
         plan.inverse(&mut values).unwrap();
         plan.derivative(&values, &mut element_derivative).unwrap();
+        novel_to_monomial_with_scratch(&mut values, &plan, &mut conversion_scratch).unwrap();
+        monomial_to_novel_with_scratch(&mut values, &plan, &mut conversion_scratch).unwrap();
+        novel_to_monomial_bytes(&mut rows, row_len, &plan, &mut conversion_byte_scratch).unwrap();
+        monomial_to_novel_bytes(&mut rows, row_len, &plan, &mut conversion_byte_scratch).unwrap();
     });
 
     assert_eq!(
