@@ -15,32 +15,20 @@
 //! linearized `W̄_{k-1}` (`k` nonzero terms) on the way up; monomial → novel
 //! divides by it on the way down. Both are `O(n·k)` per level.
 
-use ::alloc::{vec, vec::Vec};
+use ::alloc::vec;
 
 use fff::field::Elem;
 
-use crate::core::factors;
-use crate::core::kernel::ButterflyKernels;
+use crate::core::kernel::{ButterflyKernels, xor_scaled_bytes};
 use crate::core::transform::TransformPlan;
 use crate::error::TransformLengthError;
 
-/// The normalized subspace polynomials of a plan's basis, as coefficient
-/// lists of `x^(2^j)` (low `j` first) with the normalizer folded in.
-///
-/// `chain[d]` has `d + 1` entries and leading term `x^(2^d)`, so it is the
-/// factor splitting a dimension-`(d+1)` node.
-fn normalized_chain<F: ButterflyKernels>(plan: &TransformPlan<F>) -> Vec<Vec<F::Elem>> {
-    factors::subspace_polynomials(plan.basis())
-        .expect("a plan's basis is independent by construction")
-        .iter()
-        .map(|polynomial| {
-            polynomial
-                .coefficients
-                .iter()
-                .map(|&coefficient| coefficient.mul(polynomial.normalizer_inverse))
-                .collect()
-        })
-        .collect()
+/// Number of field elements required by scratch-taking coefficient
+/// conversions for a domain of `size` coefficients.
+#[inline]
+#[must_use]
+pub const fn conversion_scratch_elements(size: usize) -> usize {
+    size / 2
 }
 
 /// Rewrite novel-basis coefficients as monomial coefficients in place.
@@ -59,9 +47,36 @@ pub fn novel_to_monomial<F: ButterflyKernels>(
     if plan.log_size() == 0 {
         return Ok(());
     }
-    let chain = normalized_chain(plan);
-    let mut scratch = vec![F::Elem::ZERO; plan.size() / 2];
-    novel_to_monomial_node(coefficients, &chain, plan.log_size(), &mut scratch);
+    let mut scratch = vec![F::Elem::ZERO; conversion_scratch_elements(plan.size())];
+    novel_to_monomial_node(coefficients, plan, plan.log_size(), &mut scratch);
+    Ok(())
+}
+/// Rewrite novel-basis coefficients as monomial coefficients in place using
+/// caller-provided scratch.
+///
+/// This allocation-free variant requires at least
+/// [`conversion_scratch_elements`]`(plan.size())` scratch elements. All
+/// coefficient entries are final outputs on return.
+///
+/// # Errors
+/// Returns [`TransformLengthError`] unless `coefficients.len() ==
+/// plan.size()` and `scratch` is large enough.
+pub fn novel_to_monomial_with_scratch<F: ButterflyKernels>(
+    coefficients: &mut [F::Elem],
+    plan: &TransformPlan<F>,
+    scratch: &mut [F::Elem],
+) -> Result<(), TransformLengthError> {
+    check_len(coefficients.len(), plan.size())?;
+    let required = conversion_scratch_elements(plan.size());
+    check_min_len(scratch.len(), required)?;
+    if plan.log_size() != 0 {
+        novel_to_monomial_node(
+            coefficients,
+            plan,
+            plan.log_size(),
+            &mut scratch[..required],
+        );
+    }
     Ok(())
 }
 
@@ -79,9 +94,106 @@ pub fn monomial_to_novel<F: ButterflyKernels>(
     if plan.log_size() == 0 {
         return Ok(());
     }
-    let chain = normalized_chain(plan);
-    let mut scratch = vec![F::Elem::ZERO; plan.size() / 2];
-    monomial_to_novel_node(coefficients, &chain, plan.log_size(), &mut scratch);
+    let mut scratch = vec![F::Elem::ZERO; conversion_scratch_elements(plan.size())];
+    monomial_to_novel_node(coefficients, plan, plan.log_size(), &mut scratch);
+    Ok(())
+}
+/// Rewrite monomial coefficients as novel-basis coefficients in place using
+/// caller-provided scratch.
+///
+/// This allocation-free variant requires at least
+/// [`conversion_scratch_elements`]`(plan.size())` scratch elements. All
+/// coefficient entries are final outputs on return.
+///
+/// # Errors
+/// Returns [`TransformLengthError`] unless `coefficients.len() ==
+/// plan.size()` and `scratch` is large enough.
+pub fn monomial_to_novel_with_scratch<F: ButterflyKernels>(
+    coefficients: &mut [F::Elem],
+    plan: &TransformPlan<F>,
+    scratch: &mut [F::Elem],
+) -> Result<(), TransformLengthError> {
+    check_len(coefficients.len(), plan.size())?;
+    let required = conversion_scratch_elements(plan.size());
+    check_min_len(scratch.len(), required)?;
+    if plan.log_size() != 0 {
+        monomial_to_novel_node(
+            coefficients,
+            plan,
+            plan.log_size(),
+            &mut scratch[..required],
+        );
+    }
+    Ok(())
+}
+
+/// Rewrite SIMD-batched novel-basis coefficient rows as monomial coefficient
+/// rows in place.
+///
+/// Row `d` contains one or more packed field elements, each an independent
+/// polynomial lane. On return every row is a final output: row `d` contains
+/// the monomial coefficient of `x^d` for each lane. `scratch` must hold at
+/// least `plan.size() / 2` rows of `row_len` bytes.
+///
+/// # Errors
+/// Returns [`TransformLengthError`] (lengths in bytes) unless `coefficients`
+/// holds exactly `plan.size()` rows and `scratch` is large enough.
+///
+/// # Panics
+/// Panics if `row_len` is zero, holds a partial trailing element, or a
+/// complete byte length is not representable by [`usize`].
+pub fn novel_to_monomial_bytes<F: ButterflyKernels>(
+    coefficients: &mut [u8],
+    row_len: usize,
+    plan: &TransformPlan<F>,
+    scratch: &mut [u8],
+) -> Result<(), TransformLengthError> {
+    let required = check_byte_geometry::<F>(coefficients.len(), row_len, plan.size())?;
+    check_min_len(scratch.len(), required)?;
+    if plan.log_size() != 0 {
+        novel_to_monomial_bytes_node(
+            coefficients,
+            row_len,
+            plan,
+            plan.log_size(),
+            &mut scratch[..required],
+        );
+    }
+    Ok(())
+}
+
+/// Rewrite SIMD-batched monomial coefficient rows as novel-basis coefficient
+/// rows in place.
+///
+/// Row `d` contains one or more packed field elements, each an independent
+/// polynomial lane. On return every row is a final output: row `i` contains
+/// the novel-basis coefficient of `X_i` for each lane. `scratch` must hold at
+/// least `plan.size() / 2` rows of `row_len` bytes.
+///
+/// # Errors
+/// Returns [`TransformLengthError`] (lengths in bytes) unless `coefficients`
+/// holds exactly `plan.size()` rows and `scratch` is large enough.
+///
+/// # Panics
+/// Panics if `row_len` is zero, holds a partial trailing element, or a
+/// complete byte length is not representable by [`usize`].
+pub fn monomial_to_novel_bytes<F: ButterflyKernels>(
+    coefficients: &mut [u8],
+    row_len: usize,
+    plan: &TransformPlan<F>,
+    scratch: &mut [u8],
+) -> Result<(), TransformLengthError> {
+    let required = check_byte_geometry::<F>(coefficients.len(), row_len, plan.size())?;
+    check_min_len(scratch.len(), required)?;
+    if plan.log_size() != 0 {
+        monomial_to_novel_bytes_node(
+            coefficients,
+            row_len,
+            plan,
+            plan.log_size(),
+            &mut scratch[..required],
+        );
+    }
     Ok(())
 }
 
@@ -93,13 +205,38 @@ fn check_len(got: usize, expected: usize) -> Result<(), TransformLengthError> {
     }
 }
 
+fn check_min_len(got: usize, expected: usize) -> Result<(), TransformLengthError> {
+    if got >= expected {
+        Ok(())
+    } else {
+        Err(TransformLengthError { expected, got })
+    }
+}
+
+fn check_byte_geometry<F: ButterflyKernels>(
+    got: usize,
+    row_len: usize,
+    size: usize,
+) -> Result<usize, TransformLengthError> {
+    assert_ne!(row_len, 0, "row length must be nonzero");
+    assert_eq!(row_len % F::BYTES, 0, "partial trailing element");
+    let expected = size
+        .checked_mul(row_len)
+        .expect("coefficient byte length overflow");
+    let required = conversion_scratch_elements(size)
+        .checked_mul(row_len)
+        .expect("scratch byte length overflow");
+    check_len(got, expected)?;
+    Ok(required)
+}
+
 /// Bottom-up: convert both halves, then fold them together as
 /// `f = f_lo + W̄_{dimension-1}·f_hi`.
-fn novel_to_monomial_node<E: Elem>(
-    values: &mut [E],
-    chain: &[Vec<E>],
+fn novel_to_monomial_node<F: ButterflyKernels>(
+    values: &mut [F::Elem],
+    plan: &TransformPlan<F>,
     dimension: usize,
-    scratch: &mut [E],
+    scratch: &mut [F::Elem],
 ) {
     if dimension == 0 {
         return;
@@ -107,17 +244,17 @@ fn novel_to_monomial_node<E: Elem>(
     let half = values.len() / 2;
     {
         let (low, high) = values.split_at_mut(half);
-        novel_to_monomial_node(low, chain, dimension - 1, scratch);
-        novel_to_monomial_node(high, chain, dimension - 1, scratch);
+        novel_to_monomial_node(low, plan, dimension - 1, scratch);
+        novel_to_monomial_node(high, plan, dimension - 1, scratch);
     }
 
     // `f_hi` currently sits in the upper half as coefficients of degree
     // `0..half`; the product scatters it across the whole range, including
     // over itself, so it is lifted out first.
-    let factor = &chain[dimension - 1];
-    let (product_source, _) = scratch.split_at_mut(half);
+    let factor = plan.normalized_subspace_polynomial(dimension - 1);
+    let product_source = &mut scratch[..half];
     product_source.copy_from_slice(&values[half..]);
-    values[half..].fill(E::ZERO);
+    values[half..].fill(F::Elem::ZERO);
     for (degree, &coefficient) in product_source.iter().enumerate() {
         if coefficient.is_zero() {
             continue;
@@ -134,18 +271,18 @@ fn novel_to_monomial_node<E: Elem>(
 
 /// Top-down: divide by `W̄_{dimension-1}`; the remainder is the low
 /// coefficient half and the quotient is the high half, then recurse.
-fn monomial_to_novel_node<E: Elem>(
-    values: &mut [E],
-    chain: &[Vec<E>],
+fn monomial_to_novel_node<F: ButterflyKernels>(
+    values: &mut [F::Elem],
+    plan: &TransformPlan<F>,
     dimension: usize,
-    scratch: &mut [E],
+    scratch: &mut [F::Elem],
 ) {
     if dimension == 0 {
         return;
     }
     let length = values.len();
     let half = length / 2;
-    let factor = &chain[dimension - 1];
+    let factor = plan.normalized_subspace_polynomial(dimension - 1);
     // `W̄` has degree `2^(dimension-1) == half`; its leading coefficient is
     // the only one that can normalize the division.
     let leading_inverse = factor[dimension - 1].inv();
@@ -171,14 +308,120 @@ fn monomial_to_novel_node<E: Elem>(
     // The quotient has been moved into `values`, so the whole scratch is
     // free again; children need only `half / 2` of it.
     let (low, high) = values.split_at_mut(half);
-    monomial_to_novel_node(low, chain, dimension - 1, scratch);
-    monomial_to_novel_node(high, chain, dimension - 1, scratch);
+    monomial_to_novel_node(low, plan, dimension - 1, scratch);
+    monomial_to_novel_node(high, plan, dimension - 1, scratch);
+}
+
+fn row_range(index: usize, row_len: usize) -> ::core::ops::Range<usize> {
+    let start = index.checked_mul(row_len).expect("row offset overflow");
+    let end = start.checked_add(row_len).expect("row end overflow");
+    start..end
+}
+
+/// Byte-row form of the bottom-up coefficient conversion. Each row operation
+/// runs across every packed lane through fff's dispatched vector primitives.
+fn novel_to_monomial_bytes_node<F: ButterflyKernels>(
+    values: &mut [u8],
+    row_len: usize,
+    plan: &TransformPlan<F>,
+    dimension: usize,
+    scratch: &mut [u8],
+) {
+    if dimension == 0 {
+        return;
+    }
+    let shift = u32::try_from(dimension - 1).expect("coefficient dimension overflow");
+    let half_rows = 1usize
+        .checked_shl(shift)
+        .expect("coefficient row count overflow");
+    let half_bytes = half_rows
+        .checked_mul(row_len)
+        .expect("coefficient half length overflow");
+    {
+        let (low, high) = values.split_at_mut(half_bytes);
+        novel_to_monomial_bytes_node(low, row_len, plan, dimension - 1, scratch);
+        novel_to_monomial_bytes_node(high, row_len, plan, dimension - 1, scratch);
+    }
+
+    let factor = plan.normalized_subspace_polynomial(dimension - 1);
+    let product_source = &mut scratch[..half_bytes];
+    product_source.copy_from_slice(&values[half_bytes..]);
+    values[half_bytes..].fill(0);
+    for degree in 0..half_rows {
+        let source = &product_source[row_range(degree, row_len)];
+        for (exponent, &term) in factor.iter().enumerate() {
+            if term.is_zero() {
+                continue;
+            }
+            let target = degree
+                .checked_add(1usize << exponent)
+                .expect("coefficient row index overflow");
+            xor_scaled_bytes::<F>(&mut values[row_range(target, row_len)], term, source);
+        }
+    }
+}
+
+/// Byte-row form of top-down polynomial division. Quotient rows live in
+/// scratch, letting each scaled row update batch every independent lane.
+fn monomial_to_novel_bytes_node<F: ButterflyKernels>(
+    values: &mut [u8],
+    row_len: usize,
+    plan: &TransformPlan<F>,
+    dimension: usize,
+    scratch: &mut [u8],
+) {
+    if dimension == 0 {
+        return;
+    }
+    let shift = u32::try_from(dimension).expect("coefficient dimension overflow");
+    let length_rows = 1usize
+        .checked_shl(shift)
+        .expect("coefficient row count overflow");
+    let half_rows = length_rows / 2;
+    let half_bytes = half_rows
+        .checked_mul(row_len)
+        .expect("coefficient half length overflow");
+    let factor = plan.normalized_subspace_polynomial(dimension - 1);
+    let leading_inverse = factor[dimension - 1].inv();
+
+    for degree in (half_rows..length_rows).rev() {
+        let quotient_index = degree - half_rows;
+        let quotient_range = row_range(quotient_index, row_len);
+        {
+            let quotient = &mut scratch[quotient_range.clone()];
+            quotient.fill(0);
+            xor_scaled_bytes::<F>(
+                quotient,
+                leading_inverse,
+                &values[row_range(degree, row_len)],
+            );
+        }
+        for (exponent, &term) in factor.iter().enumerate() {
+            if term.is_zero() {
+                continue;
+            }
+            let target = quotient_index
+                .checked_add(1usize << exponent)
+                .expect("coefficient row index overflow");
+            xor_scaled_bytes::<F>(
+                &mut values[row_range(target, row_len)],
+                term,
+                &scratch[quotient_range.clone()],
+            );
+        }
+    }
+    values[half_bytes..].copy_from_slice(&scratch[..half_bytes]);
+
+    let (low, high) = values.split_at_mut(half_bytes);
+    monomial_to_novel_bytes_node(low, row_len, plan, dimension - 1, scratch);
+    monomial_to_novel_bytes_node(high, row_len, plan, dimension - 1, scratch);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::basis::{BitBasis, CantorBasis, OrderedBasis};
+    use ::alloc::vec::Vec;
     use fff::field::Field;
     use fff::{Gf8, Gf16};
 
@@ -198,6 +441,35 @@ mod tests {
 
         fn elems<F: Field>(&mut self, count: usize) -> Vec<F::Elem> {
             (0..count).map(|_| self.elem::<F>()).collect()
+        }
+    }
+
+    fn pack<F: Field>(lanes: &[Vec<F::Elem>]) -> Vec<u8> {
+        let size = lanes.first().map_or(0, Vec::len);
+        let row_len = lanes.len() * F::BYTES;
+        let mut rows = vec![0u8; size * row_len];
+        for (lane, coefficients) in lanes.iter().enumerate() {
+            assert_eq!(coefficients.len(), size);
+            for (degree, &coefficient) in coefficients.iter().enumerate() {
+                let start = degree * row_len + lane * F::BYTES;
+                F::write(&mut rows[start..start + F::BYTES], coefficient);
+            }
+        }
+        rows
+    }
+
+    fn assert_rows<F: Field>(rows: &[u8], expected: &[Vec<F::Elem>]) {
+        let row_len = expected.len() * F::BYTES;
+        for (lane, coefficients) in expected.iter().enumerate() {
+            for (degree, &coefficient) in coefficients.iter().enumerate() {
+                let start = degree * row_len + lane * F::BYTES;
+                assert_eq!(
+                    F::read(&rows[start..start + F::BYTES]),
+                    coefficient,
+                    "{} degree {degree} lane {lane}",
+                    F::NAME
+                );
+            }
         }
     }
 
@@ -222,6 +494,82 @@ mod tests {
         monomial_to_novel(&mut values, plan).unwrap();
         novel_to_monomial(&mut values, plan).unwrap();
         assert_eq!(values, original, "{} size {}", F::NAME, plan.size());
+    }
+
+    fn scratch_and_byte_variants<F: ButterflyKernels>(
+        plan: &TransformPlan<F>,
+        lanes: usize,
+        rng: &mut Rng,
+    ) {
+        let required = conversion_scratch_elements(plan.size());
+
+        let monomial = rng.elems::<F>(plan.size());
+        let mut expected_novel = monomial.clone();
+        monomial_to_novel(&mut expected_novel, plan).unwrap();
+        let mut scratch_novel = monomial.clone();
+        let mut element_scratch = vec![F::Elem::ZERO; required + 1];
+        monomial_to_novel_with_scratch(&mut scratch_novel, plan, &mut element_scratch).unwrap();
+        assert_eq!(scratch_novel, expected_novel);
+
+        let novel = rng.elems::<F>(plan.size());
+        let mut expected_monomial = novel.clone();
+        novel_to_monomial(&mut expected_monomial, plan).unwrap();
+        let mut scratch_monomial = novel.clone();
+        novel_to_monomial_with_scratch(&mut scratch_monomial, plan, &mut element_scratch).unwrap();
+        assert_eq!(scratch_monomial, expected_monomial);
+
+        let monomial_lanes: Vec<Vec<F::Elem>> =
+            (0..lanes).map(|_| rng.elems::<F>(plan.size())).collect();
+        let expected_novel_lanes: Vec<Vec<F::Elem>> = monomial_lanes
+            .iter()
+            .map(|lane| {
+                let mut converted = lane.clone();
+                monomial_to_novel(&mut converted, plan).unwrap();
+                converted
+            })
+            .collect();
+        let row_len = lanes * F::BYTES;
+        let mut rows = pack::<F>(&monomial_lanes);
+        let mut byte_scratch = vec![0xa5; required * row_len + F::BYTES];
+        monomial_to_novel_bytes(&mut rows, row_len, plan, &mut byte_scratch).unwrap();
+        assert_rows::<F>(&rows, &expected_novel_lanes);
+
+        let novel_lanes: Vec<Vec<F::Elem>> =
+            (0..lanes).map(|_| rng.elems::<F>(plan.size())).collect();
+        let expected_monomial_lanes: Vec<Vec<F::Elem>> = novel_lanes
+            .iter()
+            .map(|lane| {
+                let mut converted = lane.clone();
+                novel_to_monomial(&mut converted, plan).unwrap();
+                converted
+            })
+            .collect();
+        let mut rows = pack::<F>(&novel_lanes);
+        novel_to_monomial_bytes(&mut rows, row_len, plan, &mut byte_scratch).unwrap();
+        assert_rows::<F>(&rows, &expected_monomial_lanes);
+    }
+
+    #[test]
+    fn scratch_and_simd_batched_variants_match_element_conversions() {
+        let mut rng = Rng(0x6a09_e667_f3bc_c909);
+        for &(log_size, lanes) in &[(0usize, 1usize), (1, 3), (3, 17), (5, 33)] {
+            scratch_and_byte_variants(
+                &TransformPlan::<Gf8>::new(1 << log_size).unwrap(),
+                lanes,
+                &mut rng,
+            );
+            scratch_and_byte_variants(
+                &TransformPlan::<Gf16>::new(1 << log_size).unwrap(),
+                lanes,
+                &mut rng,
+            );
+        }
+        let cantor = CantorBasis::<Gf16>::build().unwrap();
+        scratch_and_byte_variants(
+            &TransformPlan::<Gf16>::with_basis(32, &cantor.prefix(5)).unwrap(),
+            19,
+            &mut rng,
+        );
     }
 
     #[test]
@@ -313,16 +661,86 @@ mod tests {
     }
 
     #[test]
-    fn wrong_length_is_rejected() {
+    fn wrong_lengths_are_rejected() {
         let plan = TransformPlan::<Gf16>::new(8).unwrap();
-        let mut values = vec![<Gf16 as Field>::Elem::ZERO; 7];
+        let mut short_values = vec![<Gf16 as Field>::Elem::ZERO; 7];
+        let coefficient_error = TransformLengthError {
+            expected: 8,
+            got: 7,
+        };
         assert_eq!(
-            novel_to_monomial(&mut values, &plan).unwrap_err(),
-            TransformLengthError {
-                expected: 8,
-                got: 7
-            }
+            novel_to_monomial(&mut short_values, &plan).unwrap_err(),
+            coefficient_error
         );
-        assert!(monomial_to_novel(&mut values, &plan).is_err());
+        assert_eq!(
+            monomial_to_novel(&mut short_values, &plan).unwrap_err(),
+            coefficient_error
+        );
+
+        let mut values = vec![<Gf16 as Field>::Elem::ZERO; 8];
+        let mut short_scratch = vec![<Gf16 as Field>::Elem::ZERO; 3];
+        let scratch_error = TransformLengthError {
+            expected: 4,
+            got: 3,
+        };
+        assert_eq!(
+            novel_to_monomial_with_scratch(&mut values, &plan, &mut short_scratch).unwrap_err(),
+            scratch_error
+        );
+        assert_eq!(
+            monomial_to_novel_with_scratch(&mut values, &plan, &mut short_scratch).unwrap_err(),
+            scratch_error
+        );
+
+        let mut short_rows = vec![0u8; 15];
+        let mut byte_scratch = vec![0u8; 8];
+        let byte_coefficient_error = TransformLengthError {
+            expected: 16,
+            got: 15,
+        };
+        assert_eq!(
+            novel_to_monomial_bytes(&mut short_rows, 2, &plan, &mut byte_scratch).unwrap_err(),
+            byte_coefficient_error
+        );
+        assert_eq!(
+            monomial_to_novel_bytes(&mut short_rows, 2, &plan, &mut byte_scratch).unwrap_err(),
+            byte_coefficient_error
+        );
+
+        let mut rows = vec![0u8; 16];
+        let mut short_byte_scratch = vec![0u8; 7];
+        let byte_scratch_error = TransformLengthError {
+            expected: 8,
+            got: 7,
+        };
+        assert_eq!(
+            novel_to_monomial_bytes(&mut rows, 2, &plan, &mut short_byte_scratch).unwrap_err(),
+            byte_scratch_error
+        );
+        assert_eq!(
+            monomial_to_novel_bytes(&mut rows, 2, &plan, &mut short_byte_scratch).unwrap_err(),
+            byte_scratch_error
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "row length must be nonzero")]
+    fn zero_row_length_panics_before_execution() {
+        let plan = TransformPlan::<Gf16>::new(8).unwrap();
+        novel_to_monomial_bytes(&mut [], 0, &plan, &mut []).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "partial trailing element")]
+    fn partial_element_row_panics_before_execution() {
+        let plan = TransformPlan::<Gf16>::new(8).unwrap();
+        monomial_to_novel_bytes(&mut [], 3, &plan, &mut []).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "coefficient byte length overflow")]
+    fn overflowing_byte_geometry_panics_before_execution() {
+        let plan = TransformPlan::<Gf16>::new(8).unwrap();
+        novel_to_monomial_bytes(&mut [], usize::MAX - 1, &plan, &mut []).unwrap();
     }
 }

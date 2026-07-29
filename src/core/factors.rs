@@ -29,6 +29,8 @@ pub(crate) struct NormalizedSubspacePolynomial<E> {
     pub(crate) coefficients: Vec<E>,
     /// `1 / W_k(β_k)`.
     pub(crate) normalizer_inverse: E,
+    /// Coefficients with `normalizer_inverse` folded in.
+    pub(crate) normalized_coefficients: Vec<E>,
 }
 
 impl<E: Elem> NormalizedSubspacePolynomial<E> {
@@ -82,9 +84,14 @@ pub(crate) fn subspace_polynomials<E: Elem>(
         if normalizer.is_zero() {
             return None;
         }
+        let normalizer_inverse = normalizer.inv();
         result.push(NormalizedSubspacePolynomial {
             coefficients: coefficients.clone(),
-            normalizer_inverse: normalizer.inv(),
+            normalizer_inverse,
+            normalized_coefficients: coefficients
+                .iter()
+                .map(|&coefficient| scale(normalizer_inverse, coefficient))
+                .collect(),
         });
 
         if dimension + 1 != basis.len() {
@@ -134,6 +141,8 @@ pub(crate) fn fill_factors<E: Elem>(
 pub struct FactorTable<F: Field> {
     pub(crate) factors: Vec<F::Elem>,
     pub(crate) derivative_factors: Vec<F::Elem>,
+    /// Normalized subspace polynomials retained for coefficient conversion.
+    pub(crate) polynomials: Vec<NormalizedSubspacePolynomial<F::Elem>>,
 }
 
 impl<F: Field> FactorTable<F> {
@@ -147,7 +156,7 @@ impl<F: Field> FactorTable<F> {
         let polynomials = subspace_polynomials(&basis[..log_size])?;
         let derivative_factors = polynomials
             .iter()
-            .map(|polynomial| scale(polynomial.normalizer_inverse, polynomial.coefficients[0]))
+            .map(|polynomial| polynomial.normalized_coefficients[0])
             .collect();
         let mut factors = vec![F::Elem::ZERO; 1 << log_size];
         if log_size != 0 {
@@ -156,6 +165,7 @@ impl<F: Field> FactorTable<F> {
         Some(Self {
             factors,
             derivative_factors,
+            polynomials,
         })
     }
 }
