@@ -4,12 +4,12 @@ version = 4
 
 [[package]]
 name = "cafft"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fff",
 ]
 
 [[package]]
 name = "fff"
-version = "0.1.0"
-source = "git+https://github.com/nanithefkuc/fff.git#fac917fba090b2f969c6f3d86a3ef2a901d8ca86"
+version = "0.1.1"
+source = "git+https://github.com/nanithefkuc/fff.git#d138202bc251cab007567d3b463dacea39c4feea"
