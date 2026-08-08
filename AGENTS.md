@@ -81,7 +81,8 @@ consumers.
   ```sh
   cargo test --all-features
   cargo test --no-default-features
-  CAFFT_BACKEND=scalar cargo test --all-features   # and each weaker backend
+  SIMD_BACKEND=scalar cargo test --all-features    # and each weaker backend
+  # SIMD_BACKEND is owned by simdispatch (Level 0), shared with fff.
   cargo fmt --check
   cargo clippy --all-features --all-targets
   cargo doc --all-features --no-deps

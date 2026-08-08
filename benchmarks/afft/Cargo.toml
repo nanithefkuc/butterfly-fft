@@ -14,7 +14,7 @@ cc = "1"
 cafft = { path = "../.." }
 additive-fft-reed-solomon = { git = "https://github.com/vkomenda/additive-fft-reed-solomon", rev = "f1bcc91102b74f860c93dcf0b75887ff85755564", features = ["compile_gfni"] }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
-fff = { git = "https://github.com/nanithefkuc/fff.git" }
+fff = { git = "https://github.com/nanithefkuc/fff.git", rev = "5f4c04a25cd4855bc1f7035d62b3b96eef83965e" }
 
 [[bench]]
 name = "raw_afft"

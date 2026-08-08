@@ -8,17 +8,25 @@
 //!
 //! ## Backends
 //!
-//! cafft supports a subset of [`fff::kernel::Backend`]: AVX-512 hosts run the
-//! GFNI kernels (AVX-512 detection implies GFNI), and WebAssembly runs scalar
-//! until dedicated `simd128` butterflies exist. GF(2^8) and GF(2^16) have
-//! dedicated kernels on `x86` (GFNI/AVX2/SSSE3) and `AArch64` (NEON); wider
-//! fields always report [`Backend::Scalar`].
+//! cafft supports a subset of [`Backend`] (a re-export of
+//! [`simdispatch::Backend`](https://docs.rs/simdispatch)): the
+//! `v3_gfni_crypto` / `v3` / `v2` tiers on x86 and `neon` / `neon_aes` on
+//! `AArch64` GF(2^8) and GF(2^16) butterflies. WebAssembly runs scalar (no
+//! dedicated `wasm128` butterflies), and wider fields always report
+//! [`Backend::Scalar`]. Detection, ordering, and the downgrade-only override
+//! are single-source: [`Selection`] resolves over [`CAFFT_TIERS`].
 //!
-//! The process backend may be downgraded at startup via the `CAFFT_BACKEND`
-//! environment variable (`gfni`, `avx2`, `ssse3`, `neon`, `scalar`), applied
-//! after — and independently of — fff's own `FFF_BACKEND`. Requests for a
-//! backend the host cannot run are ignored: running vector code without the
-//! instruction set is undefined behaviour, not a configuration choice.
+//! The process backend may be downgraded at startup via the one stack-wide
+//! `SIMD_BACKEND` environment variable (`v3_gfni_crypto`, `v3`, `v2`,
+//! `neon_aes`, `neon`, `scalar`), owned by `simdispatch` and shared with fff.
+//! Requests for a backend the host cannot run are ignored: running vector code
+//! without the instruction set is undefined behaviour, not a configuration
+//! choice.
+//!
+//! On an `AArch64` `PMULL` host this resolves to [`Backend::NeonAes`] (the
+//! tier's `aes` feature proves `PMULL`) even though the butterflies run the
+//! NEON kernels — the historical `supported_on_host` had no `PMULL` arm and
+//! silently reported `Neon` (the rot this crate's parent plan deletes).
 
 // Unsafe is expected and confined here: this module owns every intrinsic in
 // the crate, all behind runtime feature detection. The rest of the crate
@@ -37,89 +45,79 @@ use fff::field::Elem;
 use fff::kernel::FieldKernels;
 use fff::{FanPaar8, FanPaar16, FanPaar32, FanPaar64, Gf8, Gf16, Gf32, Gf64};
 
+// The backend ladder and the downgrade-only override are owned by
+// `simdispatch` (Level 0); fff re-exports the same ladder, so `Backend`
+// here and `fff::kernel::Backend` are the same type.
 pub use fff::kernel::Backend;
 
-#[cfg(feature = "std")]
-static BACKEND: ::std::sync::LazyLock<Backend> = ::std::sync::LazyLock::new(resolve_backend);
+// Only the SIMD resolve path consults the environment: a `simd`-less build
+// reports `Scalar`.
+#[cfg(feature = "simd")]
+use simdispatch::Selection;
 
-/// Map fff's backend onto the set cafft implements.
-const fn cap(backend: Backend) -> Backend {
-    match backend {
-        // cafft uses its 32-byte AVX2+GFNI kernels on AVX-512 hosts. Host
-        // support for both target features is checked separately below.
-        Backend::Avx512 => Backend::Gfni,
-        // No wasm butterflies yet.
-        Backend::Simd128 => Backend::Scalar,
-        other => other,
-    }
-}
+/// The tiers cafft implements butterfly kernels for, in detection-preference
+/// order: the shared ladder minus `V1` (the shuffle kernels need SSSE3), minus
+/// `Wasm128` (no dedicated butterflies), and minus the deferred 64-byte
+/// AVX-512 tier (`V4x`). `AArch64` keeps both `NeonAes` and `Neon` so `PMULL`
+/// hosts resolve to the crypto tier rather than silently reporting `Neon`.
+pub const CAFFT_TIERS: &[Backend] = &[
+    Backend::V3GfniCrypto,
+    Backend::V3,
+    Backend::V2,
+    Backend::NeonAes,
+    Backend::Neon,
+    Backend::Scalar,
+];
 
-/// Whether every target feature required by `backend` is available now.
-#[cfg(feature = "std")]
-fn supported_on_host(backend: Backend) -> bool {
-    match backend {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        Backend::Gfni => {
-            ::std::arch::is_x86_feature_detected!("avx2")
-                && ::std::arch::is_x86_feature_detected!("gfni")
-        }
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        Backend::Avx2 => ::std::arch::is_x86_feature_detected!("avx2"),
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        Backend::Ssse3 => ::std::arch::is_x86_feature_detected!("ssse3"),
-        #[cfg(target_arch = "aarch64")]
-        Backend::Neon => ::std::arch::is_aarch64_feature_detected!("neon"),
-        Backend::Scalar => true,
-        _ => false,
-    }
-}
-
-#[cfg(feature = "std")]
-fn resolve_backend() -> Backend {
-    // fff's resolution already honored FFF_BACKEND; cap to cafft's set,
-    // then independently prove every feature required by our target-feature
-    // kernels. Scalar is the safe fallback for unusual feature masks.
-    let detected = cap(fff::kernel::backend());
-    let detected = if supported_on_host(detected) {
-        detected
-    } else {
-        Backend::Scalar
-    };
-    match ::std::env::var("CAFFT_BACKEND") {
-        Ok(name) => match Backend::from_name(name.trim()) {
-            // Downgrade-only: requests must be weaker than the detected set.
-            Some(requested) if supported_on_host(requested) && requested >= detected => requested,
-            _ => detected,
-        },
-        Err(_) => detected,
-    }
-}
-
-/// The backend the butterfly kernels run on, detected once per process.
+/// The backend the butterfly kernels run on, resolved once per process.
 ///
-/// May be downgraded at startup via `CAFFT_BACKEND`; see the module docs.
+/// `simdispatch::Selection` over [`CAFFT_TIERS`], adjusted by the one
+/// stack-wide `SIMD_BACKEND` downgrade-only override; detected via the
+/// single `archmage` `summon()` probe.
+///
+/// The `LazyLock` caches the resolve so dispatch never touches the
+/// environment per call — a memoized `simdispatch` selection, not a second
+/// resolver.
 #[inline]
 #[must_use]
 pub fn backend() -> Backend {
-    #[cfg(feature = "std")]
+    #[cfg(feature = "simd")]
     {
         *BACKEND
     }
-    #[cfg(not(feature = "std"))]
+    #[cfg(not(feature = "simd"))]
     {
         Backend::Scalar
     }
 }
 
-/// The backend used for field `F`: the process backend capped to what the
-/// field supports. Wider fields always report [`Backend::Scalar`].
+/// Memoized [`Selection`] over [`CAFFT_TIERS`].
+#[cfg(feature = "simd")]
+static BACKEND: ::std::sync::LazyLock<Backend> = ::std::sync::LazyLock::new(|| {
+    Selection::new("SIMD_BACKEND")
+        .supports(CAFFT_TIERS)
+        .resolve()
+});
+
+/// The backend used for field `F`: the cached process backend ([`backend()`],
+/// already resolved and override-adjusted over [`CAFFT_TIERS`]) narrowed to
+/// the tiers that field's butterfly kernels implement
+/// ([`ButterflyKernels::BUTTERFLY_TIERS`]). Wider fields implement none and
+/// always report [`Backend::Scalar`].
+///
+/// The narrowing reads the cached backend rather than re-running `Selection`
+/// (which would touch the environment on every call — an allocation in the
+/// steady-state path); the old weaker-of-two merge against fff's field cap is
+/// gone.
 #[inline]
 #[must_use]
 pub fn backend_for<F: ButterflyKernels>() -> Backend {
-    let field_cap = cap(fff::kernel::backend_for::<F>());
-    let ours = backend();
-    // fff::kernel::Backend orders weaker backends greater; take the weaker.
-    if ours > field_cap { ours } else { field_cap }
+    let resolved = backend();
+    if F::BUTTERFLY_TIERS.contains(&resolved) {
+        resolved
+    } else {
+        Backend::Scalar
+    }
 }
 
 mod private {
@@ -152,6 +150,11 @@ impl private::Sealed for FanPaar64 {}
 /// runtime-detected (see [`backend`]); the dispatch layer upholds this by
 /// construction. The scalar defaults are always safe to call.
 pub trait ButterflyKernels: FieldKernels + private::Sealed {
+    /// The tiers this field's butterfly kernels implement, used to narrow
+    /// [`backend_for`]. Only GF(2^8) and GF(2^16) vectorize, so the default
+    /// is scalar-only.
+    const BUTTERFLY_TIERS: &'static [Backend] = &[Backend::Scalar];
+
     /// Fused forward butterfly, AVX2+GFNI kernel.
     ///
     /// # Safety
@@ -230,6 +233,8 @@ pub trait ButterflyKernels: FieldKernels + private::Sealed {
 }
 
 impl ButterflyKernels for Gf8 {
+    const BUTTERFLY_TIERS: &'static [Backend] = CAFFT_TIERS;
+
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     unsafe fn fused_forward_gfni(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
         // SAFETY: the dispatch layer selects GFNI only after detection.
@@ -280,6 +285,8 @@ impl ButterflyKernels for Gf8 {
 }
 
 impl ButterflyKernels for Gf16 {
+    const BUTTERFLY_TIERS: &'static [Backend] = CAFFT_TIERS;
+
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     unsafe fn fused_forward_gfni(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
         // SAFETY: the dispatch layer selects GFNI only after detection.
@@ -445,21 +452,23 @@ macro_rules! dispatch_butterfly {
             $crate::core::kernel::Backend::Scalar => {
                 $function::<$field, $crate::core::kernel::ScalarBackend<$field>>($($argument),*)
             }
+            // Both `NeonAes` (AArch64 crypto, PMULL hosts) and `Neon` run the
+            // same NEON butterflies; only the resolved tier label differs.
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            $crate::core::kernel::Backend::NeonAes | $crate::core::kernel::Backend::Neon => {
+                $function::<$field, $crate::core::kernel::NeonBackend<$field>>($($argument),*)
+            }
             #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-            $crate::core::kernel::Backend::Gfni => {
+            $crate::core::kernel::Backend::V3GfniCrypto => {
                 $function::<$field, $crate::core::kernel::GfniBackend<$field>>($($argument),*)
             }
             #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-            $crate::core::kernel::Backend::Avx2 => {
+            $crate::core::kernel::Backend::V3 => {
                 $function::<$field, $crate::core::kernel::Avx2Backend<$field>>($($argument),*)
             }
             #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-            $crate::core::kernel::Backend::Ssse3 => {
+            $crate::core::kernel::Backend::V2 => {
                 $function::<$field, $crate::core::kernel::Ssse3Backend<$field>>($($argument),*)
-            }
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            $crate::core::kernel::Backend::Neon => {
-                $function::<$field, $crate::core::kernel::NeonBackend<$field>>($($argument),*)
             }
             // backend_for never yields a backend outside the cfg'd set; the
             // wildcard only covers `Backend`'s non-exhaustiveness.
@@ -612,15 +621,39 @@ mod tests {
     use ::alloc::vec::Vec;
     use fff::field::{Elem, Field};
 
-    #[cfg(feature = "std")]
+    /// Whether the host resolves to one of the tiers in `supported` — the
+    /// shared substitute for the crate's old `supported_on_host` /
+    /// `std::is_*_feature_detected!` test gates. Detection is single-source
+    /// (`simdispatch`), and `SIMD_BACKEND` is honored, so
+    /// `SIMD_BACKEND=scalar` also skips the SIMD kernel tests.
+    fn host_supports(supported: &'static [Backend]) -> bool {
+        simdispatch::Selection::new("SIMD_BACKEND")
+            .supports(supported)
+            .resolve()
+            != Backend::Scalar
+    }
+
     #[test]
-    fn resolved_backend_has_all_required_target_features() {
-        let resolved = backend();
-        assert!(supported_on_host(resolved));
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        if resolved == Backend::Gfni {
-            assert!(::std::arch::is_x86_feature_detected!("avx2"));
-            assert!(::std::arch::is_x86_feature_detected!("gfni"));
+    fn resolved_backend_is_in_supported_tiers() {
+        // The resolution contract: `backend()` and `backend_for::<Gf8/Gf16>`
+        // always land on a tier the crate implements (or Scalar), never a
+        // backend it has no kernels for — the old `cap`-merging rot.
+        assert!(CAFFT_TIERS.contains(&backend()));
+        assert!(Gf8::BUTTERFLY_TIERS.contains(&backend_for::<Gf8>()));
+        assert!(Gf16::BUTTERFLY_TIERS.contains(&backend_for::<Gf16>()));
+        // Wider fields have no butterfly kernels: always Scalar.
+        assert_eq!(backend_for::<Gf32>(), Backend::Scalar);
+        assert_eq!(backend_for::<FanPaar64>(), Backend::Scalar);
+    }
+
+    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
+    #[test]
+    fn x86_gfni_resolution_implies_host_features() {
+        // The summon() proof is simdispatch's; here we only sanity-check the
+        // self-consistency a resolved GFNI tier implies the host really has
+        // AVX2+GFNI (garble guard for the selection wiring).
+        if backend() == Backend::V3GfniCrypto {
+            assert!(host_supports(&[Backend::V3GfniCrypto]));
         }
     }
 
@@ -856,15 +889,13 @@ mod tests {
 
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     fn differential_x86<F: ButterflyKernels>(coefficients: &[F::Elem]) {
-        if ::std::arch::is_x86_feature_detected!("avx2")
-            && ::std::arch::is_x86_feature_detected!("gfni")
-        {
+        if host_supports(&[Backend::V3GfniCrypto]) {
             differential_backend::<F, GfniBackend<F>>("gfni", coefficients);
         }
-        if ::std::arch::is_x86_feature_detected!("avx2") {
+        if host_supports(&[Backend::V3]) {
             differential_backend::<F, Avx2Backend<F>>("avx2", coefficients);
         }
-        if ::std::arch::is_x86_feature_detected!("ssse3") {
+        if host_supports(&[Backend::V2]) {
             differential_backend::<F, Ssse3Backend<F>>("ssse3", coefficients);
         }
     }

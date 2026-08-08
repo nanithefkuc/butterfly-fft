@@ -120,17 +120,19 @@ runs the portable scalar backend.
 
 ## Backends
 
-GF(2^8) and GF(2^16) have dedicated kernels on x86 (GFNI / AVX2 / SSSE3) and
-AArch64 (NEON). AVX-512 hosts run the 32-byte AVX2+GFNI kernels. WebAssembly
-and wider fields run scalar.
+GF(2^8) and GF(2^16) have dedicated kernels on x86 (`v3_gfni_crypto`,
+`v3`, `v2`) and AArch64 (`neon`; PMULL hosts resolve `neon_aes`). AVX-512
+hosts run the 32-byte GFNI kernels. WebAssembly and wider fields run scalar.
 
-The backend is resolved once per process. Set `CAFFT_BACKEND` to `gfni`,
-`avx2`, `ssse3`, `neon`, or `scalar` to force a *weaker* backend than the host
-supports — useful for testing. Requests for a backend the host cannot execute
-are ignored.
+Backends and their detection are a re-export of
+[`simdispatch::Backend`](https://docs.rs/simdispatch), resolved once per
+process over `cafft::core::kernel::CAFFT_TIERS`. Set the one stack-wide
+`SIMD_BACKEND` env var to `v3_gfni_crypto`, `v3`, `v2`, `neon_aes`, `neon`,
+or `scalar` to force a *weaker* backend than the host supports — useful for
+testing. Requests for a backend the host cannot execute are ignored.
 
 ```sh
-CAFFT_BACKEND=scalar cargo test --all-features
+SIMD_BACKEND=scalar cargo test --all-features
 ```
 
 ## Minimum supported Rust version
