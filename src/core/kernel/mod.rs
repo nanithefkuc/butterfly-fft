@@ -18,7 +18,7 @@
 //!
 //! The process backend may be downgraded at startup via the one stack-wide
 //! `SIMD_BACKEND` environment variable (`v3_gfni_crypto`, `v3`, `v2`,
-//! `neon_aes`, `neon`, `scalar`), owned by `simdispatch` and shared with fff.
+//! `neon_aes`, `neon`, `scalar`), owned by `simdispatch` and shared with fgf.
 //! Requests for a backend the host cannot run are ignored: running vector code
 //! without the instruction set is undefined behaviour, not a configuration
 //! choice.
@@ -41,14 +41,14 @@ mod x86;
 
 use ::core::marker::PhantomData;
 
-use fff::field::Elem;
-use fff::kernel::FieldKernels;
-use fff::{FanPaar8, FanPaar16, FanPaar32, FanPaar64, Gf8, Gf16, Gf32, Gf64};
+use fgf::field::Elem;
+use fgf::kernel::FieldKernels;
+use fgf::{FanPaar8, FanPaar16, FanPaar32, FanPaar64, Gf8, Gf16, Gf32, Gf64};
 
 // The backend ladder and the downgrade-only override are owned by
-// `simdispatch` (Level 0); fff re-exports the same ladder, so `Backend`
-// here and `fff::kernel::Backend` are the same type.
-pub use fff::kernel::Backend;
+// `simdispatch` (Level 0); fgf re-exports the same ladder, so `Backend`
+// here and `fgf::kernel::Backend` are the same type.
+pub use fgf::kernel::Backend;
 
 // Only the SIMD resolve path consults the environment: a `simd`-less build
 // reports `Scalar`.
@@ -107,7 +107,7 @@ static BACKEND: ::std::sync::LazyLock<Backend> = ::std::sync::LazyLock::new(|| {
 ///
 /// The narrowing reads the cached backend rather than re-running `Selection`
 /// (which would touch the environment on every call — an allocation in the
-/// steady-state path); the old weaker-of-two merge against fff's field cap is
+/// steady-state path); the old weaker-of-two merge against fgf's field cap is
 /// gone.
 #[inline]
 #[must_use]
@@ -135,10 +135,10 @@ impl private::Sealed for FanPaar64 {}
 
 /// The per-field butterfly kernel contract.
 ///
-/// Sealed: cafft implements this for fff's fields, and the set of fields
+/// Sealed: cafft implements this for fgf's fields, and the set of fields
 /// with dedicated SIMD kernels (currently GF(2^8) and GF(2^16)) is fixed by
 /// the implementation. Fields without dedicated kernels inherit the portable
-/// scalar defaults, which is why every transform works over every fff field.
+/// scalar defaults, which is why every transform works over every fgf field.
 ///
 /// Callers should use the safe wrappers ([`fused_forward`], [`fused_inverse`]
 /// and, in-crate, the backend structs plus the `dispatch_butterfly!`
@@ -492,7 +492,7 @@ pub(crate) fn fused_forward_with<F: ButterflyKernels, B: ButterflyBackend<F>>(
     debug_assert_eq!(low.len(), high.len());
     debug_assert_eq!(low.len() % F::BYTES, 0);
     if coefficient.is_zero() {
-        fff::ops::add_assign::<F>(high, low);
+        fgf::ops::add_assign::<F>(high, low);
     } else {
         B::forward_nonzero(low, high, coefficient);
     }
@@ -509,7 +509,7 @@ pub(crate) fn fused_inverse_with<F: ButterflyKernels, B: ButterflyBackend<F>>(
     debug_assert_eq!(low.len(), high.len());
     debug_assert_eq!(low.len() % F::BYTES, 0);
     if coefficient.is_zero() {
-        fff::ops::add_assign::<F>(high, low);
+        fgf::ops::add_assign::<F>(high, low);
     } else {
         B::inverse_nonzero(low, high, coefficient);
     }
@@ -556,7 +556,7 @@ pub fn fused_inverse<F: ButterflyKernels>(low: &mut [u8], high: &mut [u8], coeff
 
 /// XOR `coefficient * src` into `dst`, element by element.
 ///
-/// Thin wrapper over [`fff::ops::mul_add`] with the zero/one-coefficient
+/// Thin wrapper over [`fgf::ops::mul_add`] with the zero/one-coefficient
 /// fast paths; the workhorse for coefficient-scaled row accumulation outside
 /// the butterfly recursion.
 ///
@@ -575,10 +575,10 @@ pub fn xor_scaled_bytes<F: ButterflyKernels>(dst: &mut [u8], coefficient: F::Ele
         return;
     }
     if coefficient.is_one() {
-        fff::ops::add_assign::<F>(dst, src);
+        fgf::ops::add_assign::<F>(dst, src);
         return;
     }
-    fff::ops::mul_add::<F>(dst, coefficient, src);
+    fgf::ops::mul_add::<F>(dst, coefficient, src);
 }
 
 /// XOR one source row into every destination row with a distinct coefficient.
@@ -619,7 +619,7 @@ pub fn xor_scaled_bytes_rows<F: ButterflyKernels>(
 mod tests {
     use super::*;
     use ::alloc::vec::Vec;
-    use fff::field::{Elem, Field};
+    use fgf::field::{Elem, Field};
 
     /// Whether the host resolves to one of the tiers in `supported` — the
     /// shared substitute for the crate's old `supported_on_host` /
@@ -690,27 +690,27 @@ mod tests {
 
     #[test]
     fn scalar_roundtrip_gf8() {
-        let coefficients = [0x00, 0x01, 0x02, 0x03, 0x53, 0xff].map(fff::gf8::Elem);
+        let coefficients = [0x00, 0x01, 0x02, 0x03, 0x53, 0xff].map(fgf::gf8::Elem);
         scalar_roundtrip::<Gf8>(&coefficients);
     }
 
     #[test]
     fn scalar_roundtrip_gf16() {
-        let coefficients = [0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fff::gf16::Elem);
+        let coefficients = [0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fgf::gf16::Elem);
         scalar_roundtrip::<Gf16>(&coefficients);
     }
 
     #[test]
     fn scalar_forward_matches_element_math_gf8() {
-        for coefficient in [0x00, 0x01, 0x03, 0xff].map(fff::gf8::Elem) {
+        for coefficient in [0x00, 0x01, 0x03, 0xff].map(fgf::gf8::Elem) {
             for len in lengths(1) {
                 let low = pattern(0x3d, len);
                 let high = pattern(0xc2, len);
                 let mut expected_low = low.clone();
                 let mut expected_high = high.clone();
                 for (l, h) in expected_low.iter_mut().zip(&mut expected_high) {
-                    let lo = fff::gf8::Elem(*l);
-                    let hi = fff::gf8::Elem(*h);
+                    let lo = fgf::gf8::Elem(*l);
+                    let hi = fgf::gf8::Elem(*h);
                     let new_low = lo.add(coefficient.mul(hi));
                     *l = new_low.0;
                     *h = hi.add(new_low).0;
@@ -725,7 +725,7 @@ mod tests {
 
     #[test]
     fn scalar_forward_matches_element_math_gf16() {
-        for coefficient in [0x0000, 0x0001, 0x0108, 0xbeef].map(fff::gf16::Elem) {
+        for coefficient in [0x0000, 0x0001, 0x0108, 0xbeef].map(fgf::gf16::Elem) {
             for len in lengths(2) {
                 let low = pattern(0x3d, len);
                 let high = pattern(0xc2, len);
@@ -765,8 +765,8 @@ mod tests {
                 }
             }
         }
-        check::<Gf8>(&[0x00, 0x01, 0x53, 0xff].map(fff::gf8::Elem));
-        check::<Gf16>(&[0x0000, 0x0001, 0x0108, 0x9b37].map(fff::gf16::Elem));
+        check::<Gf8>(&[0x00, 0x01, 0x53, 0xff].map(fgf::gf8::Elem));
+        check::<Gf16>(&[0x0000, 0x0001, 0x0108, 0x9b37].map(fgf::gf16::Elem));
     }
 
     #[test]
@@ -806,12 +806,12 @@ mod tests {
                 assert_eq!(dst, expected);
             }
         }
-        check::<Gf8>(fff::gf8::Elem(0x53));
-        check::<Gf8>(fff::gf8::Elem(0x00));
-        check::<Gf8>(fff::gf8::Elem(0x01));
-        check::<Gf16>(fff::gf16::Elem(0x9b37));
-        check::<Gf16>(fff::gf16::Elem(0x0000));
-        check::<Gf16>(fff::gf16::Elem(0x0001));
+        check::<Gf8>(fgf::gf8::Elem(0x53));
+        check::<Gf8>(fgf::gf8::Elem(0x00));
+        check::<Gf8>(fgf::gf8::Elem(0x01));
+        check::<Gf16>(fgf::gf16::Elem(0x9b37));
+        check::<Gf16>(fgf::gf16::Elem(0x0000));
+        check::<Gf16>(fgf::gf16::Elem(0x0001));
     }
 
     #[test]
@@ -834,8 +834,8 @@ mod tests {
             assert_eq!(destinations, expected);
         }
 
-        check::<Gf8>(&[0x00, 0x01, 0x53, 0xff].map(fff::gf8::Elem));
-        check::<Gf16>(&[0x0000, 0x0001, 0x9b37, 0xffff].map(fff::gf16::Elem));
+        check::<Gf8>(&[0x00, 0x01, 0x53, 0xff].map(fgf::gf8::Elem));
+        check::<Gf16>(&[0x0000, 0x0001, 0x9b37, 0xffff].map(fgf::gf16::Elem));
     }
 
     /// Compare one concrete SIMD backend against the scalar reference in
@@ -903,8 +903,8 @@ mod tests {
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     #[test]
     fn x86_backends_match_scalar_in_both_directions() {
-        differential_x86::<Gf8>(&[0x00, 0x01, 0x02, 0x53, 0xff].map(fff::gf8::Elem));
-        differential_x86::<Gf16>(&[0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fff::gf16::Elem));
+        differential_x86::<Gf8>(&[0x00, 0x01, 0x02, 0x53, 0xff].map(fgf::gf8::Elem));
+        differential_x86::<Gf16>(&[0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fgf::gf16::Elem));
     }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -912,11 +912,11 @@ mod tests {
     fn neon_backends_match_scalar_in_both_directions() {
         differential_backend::<Gf8, NeonBackend<Gf8>>(
             "neon",
-            &[0x00, 0x01, 0x02, 0x53, 0xff].map(fff::gf8::Elem),
+            &[0x00, 0x01, 0x02, 0x53, 0xff].map(fgf::gf8::Elem),
         );
         differential_backend::<Gf16, NeonBackend<Gf16>>(
             "neon",
-            &[0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fff::gf16::Elem),
+            &[0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fgf::gf16::Elem),
         );
     }
 }

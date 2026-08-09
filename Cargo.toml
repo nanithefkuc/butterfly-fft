@@ -15,10 +15,10 @@ exclude = ["/.github", "/.plans", "/benchmarks"]
 default = ["std", "simd"]
 # Standard library. Required for the shared transform-plan caches and the
 # `simdispatch` runtime detection selected by `simd`.
-std = ["fff/std"]
+std = ["fgf/std"]
 # Runtime-dispatched SIMD butterfly kernels (v3_gfni_crypto / v3 / v2 on x86,
 # neon on AArch64). Disabling leaves the portable scalar backend.
-simd = ["std", "fff/simd"]
+simd = ["std", "fgf/simd"]
 # RS-facing erasure algebra: locator evaluation, Forney-style recovery,
 # systematic-locator caches, strip-blocked encode skeletons.
 rs = ["std"]
@@ -28,11 +28,11 @@ internals = []
 
 [dependencies]
 # Level 0 single source for SIMD capability selection; pinned to the
-# `v0.0.0` tag. `fff` is pinned to the post-P2 `backend/simdispatch` head so
+# `v0.0.0` tag. `fgf` is pinned to the canonical field-crate revision so
 # the two resolve the same `SIMD_BACKEND` (both re-export simdispatch's
 # ladder). Swap these revs with the dependents in the same sitting.
 simdispatch = { git = "https://github.com/nanithefkuc/simdispatch", rev = "5940194107384953cd8cd9f45c8d902b26d5686e" }
-fff = { git = "https://github.com/nanithefkuc/fff.git", rev = "5f4c04a25cd4855bc1f7035d62b3b96eef83965e" }
+fgf = { git = "https://github.com/nanithefkuc/fgf", rev = "d0e331cec2e6ae5645e529597fa913db467a44cd" }
 
 [package.metadata.docs.rs]
 all-features = true

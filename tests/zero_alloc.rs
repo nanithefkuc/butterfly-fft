@@ -14,7 +14,7 @@ use cafft::basis::{
     novel_to_monomial_bytes, novel_to_monomial_with_scratch,
 };
 use cafft::core::transform::TransformPlan;
-use fff::{Gf8, Gf16};
+use fgf::{Gf8, Gf16};
 
 struct Counting;
 

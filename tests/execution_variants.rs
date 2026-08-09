@@ -18,8 +18,8 @@
 
 use cafft::core::kernel::ButterflyKernels;
 use cafft::core::transform::TransformPlan;
-use fff::field::{Elem, Field};
-use fff::{Gf8, Gf16};
+use fgf::field::{Elem, Field};
+use fgf::{Gf8, Gf16};
 
 /// Deterministic per-test element stream.
 struct Rng(u64);

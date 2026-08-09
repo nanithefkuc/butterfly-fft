@@ -18,8 +18,8 @@ use cafft::rs::{
     ErasureLocator, LocatorScratch, RecoveryScratch, RsField, StripEncoder, SystematicLocators,
     generator_row, inverse_scratch_elements, invert_square_into, recover_rows,
 };
-use fff::field::{Elem, Field};
-use fff::{Gf8, Gf16};
+use fgf::field::{Elem, Field};
+use fgf::{Gf8, Gf16};
 
 /// xorshift64*, so patterns are varied but the failures are reproducible.
 struct Rng(u64);
@@ -336,7 +336,7 @@ fn locator_recovery_survives_a_shifted_domain() {
     // The locator only sees point differences, so an affine-coset plan
     // decodes with the same tables. Build a codeword over a coset, erase
     // half of it, recover.
-    let shift = fff::gf16::Elem(0x4d21);
+    let shift = fgf::gf16::Elem(0x4d21);
     let shifted = cafft::shifted::ShiftedPlan::<Gf16>::new(16, shift).unwrap();
     let plan = shifted.plan();
     let row_len = 4;

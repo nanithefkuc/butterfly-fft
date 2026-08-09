@@ -9,14 +9,14 @@ tables, SIMD-batched butterfly kernels, and in-place execution models, plus the
 basis, shifted-coset, and truncated variants those consumers actually need.
 
 Field arithmetic and byte-buffer vector primitives come from
-[`fff`](https://github.com/nanithefkuc/fff); this crate never re-implements
+[`fgf`](https://github.com/nanithefkuc/fgf); this crate never re-implements
 field arithmetic. Wire formats, codec shells, and evaluation-point ↔ wire-index
 maps stay with the consumer.
 
 ## Status
 
 Pre-1.0. The API is usable and covered by tests, but not yet stable. `cafft`
-is not on crates.io because it depends on `fff` by git; depend on it the same
+is not on crates.io because it depends on `fgf` by git; depend on it the same
 way.
 
 ```toml
@@ -28,7 +28,7 @@ cafft = { git = "https://github.com/nanithefkuc/cafft.git" }
 
 ```rust
 use cafft::core::transform::TransformPlan;
-use fff::{Gf16, gf16};
+use fgf::{Gf16, gf16};
 
 // A plan is built once per (field, size) and reused. Execution allocates
 // nothing.
@@ -56,7 +56,7 @@ lets the SIMD kernels run at width:
 
 ```rust
 use cafft::core::transform::TransformPlan;
-use fff::Gf16;
+use fgf::Gf16;
 
 let plan = TransformPlan::<Gf16>::shared(256)?; // process-wide cached plan
 let mut rows = vec![0u8; 256 * 4096];

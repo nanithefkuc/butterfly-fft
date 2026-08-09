@@ -6,7 +6,7 @@ expensive to rediscover; violating one is a bug even when the tests pass.
 ## Scope
 
 `cafft` is a transform engine, not a codec. Field arithmetic and byte-buffer
-vector primitives come from `fff` — never re-implement them here. Wire
+vector primitives come from `fgf` — never re-implement them here. Wire
 formats, receipt bookkeeping, and evaluation-point ↔ wire-index maps belong to
 consumers.
 
@@ -82,7 +82,7 @@ consumers.
   cargo test --all-features
   cargo test --no-default-features
   SIMD_BACKEND=scalar cargo test --all-features    # and each weaker backend
-  # SIMD_BACKEND is owned by simdispatch (Level 0), shared with fff.
+  # SIMD_BACKEND is owned by simdispatch (Level 0), shared with fgf.
   cargo fmt --check
   cargo clippy --all-features --all-targets
   cargo doc --all-features --no-deps

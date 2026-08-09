@@ -16,8 +16,8 @@ use cafft::basis::{
 };
 use cafft::core::transform::TransformPlan;
 use cafft::shifted::ShiftedPlan;
-use fff::field::{Elem, Field};
-use fff::{Gf8, Gf16};
+use fgf::field::{Elem, Field};
+use fgf::{Gf8, Gf16};
 
 struct Rng(u64);
 

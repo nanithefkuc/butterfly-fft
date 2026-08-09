@@ -17,7 +17,7 @@
 
 use ::core::arch::aarch64::*;
 
-use fff::{Gf8, Gf16, gf8, gf16};
+use fgf::{Gf8, Gf16, gf8, gf16};
 
 use super::scalar;
 

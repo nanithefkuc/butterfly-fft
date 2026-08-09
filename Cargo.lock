@@ -26,14 +26,14 @@ dependencies = [
 name = "cafft"
 version = "0.1.1"
 dependencies = [
- "fff",
+ "fgf",
  "simdispatch",
 ]
 
 [[package]]
-name = "fff"
-version = "0.2.0"
-source = "git+https://github.com/nanithefkuc/fff.git?rev=5f4c04a25cd4855bc1f7035d62b3b96eef83965e#5f4c04a25cd4855bc1f7035d62b3b96eef83965e"
+name = "fgf"
+version = "0.3.0"
+source = "git+https://github.com/nanithefkuc/fgf?rev=d0e331cec2e6ae5645e529597fa913db467a44cd#d0e331cec2e6ae5645e529597fa913db467a44cd"
 dependencies = [
  "simdispatch",
 ]

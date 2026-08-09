@@ -3,9 +3,9 @@
 //! These are the reference implementation: every SIMD backend is
 //! differentially tested against them, and vector kernels hand them their
 //! sub-lane tails. They work element by element through the field's stable
-//! byte encoding, so they are correct for every [`fff::field::Field`].
+//! byte encoding, so they are correct for every [`fgf::field::Field`].
 
-use fff::field::{Elem, Field};
+use fgf::field::{Elem, Field};
 
 /// Fused forward butterfly: `low' = low ⊕ c·high`, `high' = low' ⊕ high`.
 ///

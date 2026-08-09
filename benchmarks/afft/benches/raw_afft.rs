@@ -24,7 +24,7 @@ use cafft::core::kernel::backend as cafft_backend;
 use cafft::core::transform::TransformPlan;
 use cafft_afft_bench::{LeopardBuffer, NanorsBuffer, leopard_backend, nanors_backend};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use fff::{Gf8, Gf16};
+use fgf::{Gf8, Gf16};
 
 const GF16_POINT_COUNTS: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768];
 const GF8_POINT_COUNTS: &[usize] = &[32, 64, 128, 256];

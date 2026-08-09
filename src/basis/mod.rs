@@ -36,7 +36,7 @@ mod gf2;
 
 use ::alloc::vec::Vec;
 
-use fff::field::{Elem, Field};
+use fgf::field::{Elem, Field};
 
 pub use cantor::CantorBasis;
 #[cfg(feature = "std")]
@@ -194,7 +194,7 @@ pub fn point_of<F: Field>(basis: &[F::Elem], index: usize) -> F::Elem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fff::{FanPaar16, Gf8, Gf16, Gf32, Gf64};
+    use fgf::{FanPaar16, Gf8, Gf16, Gf32, Gf64};
 
     fn bit_basis_is_identity_map<F: Field>() {
         let map = CoordinateMap::<F>::of(&BitBasis).expect("bit basis is a full basis");

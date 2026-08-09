@@ -8,7 +8,7 @@
 //!
 //! ```
 //! use cafft::core::transform::TransformPlan;
-//! use fff::{Gf16, gf16};
+//! use fgf::{Gf16, gf16};
 //!
 //! let plan = TransformPlan::<Gf16>::new(4).unwrap();
 //! let mut values = [
@@ -26,8 +26,8 @@
 use ::alloc::{sync::Arc, vec::Vec};
 use ::core::ops::Range;
 
-use fff::field::{Elem, Field};
-use fff::ops::{self, Coeff};
+use fgf::field::{Elem, Field};
+use fgf::ops::{self, Coeff};
 
 use crate::core::factors::{self, FactorTable};
 use crate::core::kernel::{
@@ -46,7 +46,7 @@ pub const MAX_LOG_SIZE: usize = 20;
 ///
 /// Construction precomputes one normalized subspace-polynomial value per
 /// recursive node (the twiddle table) and prepares the formal-derivative
-/// factors for fff's selected backend. Forward and inverse execution each take
+/// factors for fgf's selected backend. Forward and inverse execution each take
 /// `N·log2(N)` field butterflies and allocate no memory.
 ///
 /// Evaluation points are enumerated in basis order: point `i` is the XOR of
@@ -59,7 +59,7 @@ pub struct TransformPlan<F: ButterflyKernels> {
     log_size: usize,
     /// Binary-heap node layout; root is index one.
     table: FactorTable<F>,
-    /// Derivative factors resolved once into fff's selected backend form.
+    /// Derivative factors resolved once into fgf's selected backend form.
     prepared_derivative_factors: Vec<Coeff<F>>,
     /// The ordered-basis prefix `β_0 … β_{log_size-1}` defining the domain.
     basis: Vec<F::Elem>,
@@ -1061,7 +1061,7 @@ mod tests {
     use crate::core::factors::{
         NormalizedSubspacePolynomial, bit_basis, element_from_index, subspace_polynomials,
     };
-    use fff::{Gf8, Gf16};
+    use fgf::{Gf8, Gf16};
 
     fn lcg(state: &mut u32) -> u32 {
         *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);

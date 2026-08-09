@@ -8,8 +8,8 @@
 use ::alloc::vec;
 use ::alloc::vec::Vec;
 
-use fff::field::{Elem, Field};
-use fff::{FanPaar8, FanPaar16, Gf8, Gf16};
+use fgf::field::{Elem, Field};
+use fgf::{FanPaar8, FanPaar16, Gf8, Gf16};
 
 use crate::basis::bits_of;
 use crate::core::kernel::ButterflyKernels;

@@ -67,7 +67,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 name = "cafft"
 version = "0.1.1"
 dependencies = [
- "fff",
+ "fgf",
  "simdispatch",
 ]
 
@@ -79,7 +79,7 @@ dependencies = [
  "cafft",
  "cc",
  "criterion",
- "fff",
+ "fgf",
 ]
 
 [[package]]
@@ -203,9 +203,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
-name = "fff"
-version = "0.2.0"
-source = "git+https://github.com/nanithefkuc/fff.git?rev=5f4c04a25cd4855bc1f7035d62b3b96eef83965e#5f4c04a25cd4855bc1f7035d62b3b96eef83965e"
+name = "fgf"
+version = "0.3.0"
+source = "git+https://github.com/nanithefkuc/fgf?rev=d0e331cec2e6ae5645e529597fa913db467a44cd#d0e331cec2e6ae5645e529597fa913db467a44cd"
 dependencies = [
  "simdispatch",
 ]

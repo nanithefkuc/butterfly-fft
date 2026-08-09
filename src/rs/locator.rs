@@ -31,7 +31,7 @@ use ::alloc::vec::Vec;
 use ::std::collections::HashMap;
 use ::std::sync::Mutex;
 
-use fff::field::Elem;
+use fgf::field::Elem;
 
 use crate::basis::bits_of;
 use crate::core::transform::TransformPlan;
@@ -339,7 +339,7 @@ impl<F: RsField> SystematicLocators<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fff::{Gf8, Gf16};
+    use fgf::{Gf8, Gf16};
 
     /// Direct `∏_{e ∈ E, e ≠ x} (point(x) ⊕ point(e))` — the definition,
     /// with no logarithms and no convolution.
@@ -415,9 +415,9 @@ mod tests {
 
         // A non-bit basis over Gf16.
         let basis = [
-            fff::gf16::Elem(0x1234),
-            fff::gf16::Elem(0x0108),
-            fff::gf16::Elem(0xabcd),
+            fgf::gf16::Elem(0x1234),
+            fgf::gf16::Elem(0x0108),
+            fgf::gf16::Elem(0xabcd),
         ];
         let plan = TransformPlan::<Gf16>::with_basis(8, &basis).unwrap();
         let known: Vec<bool> = (0..8).map(|index| index != 2 && index != 5).collect();
@@ -429,7 +429,7 @@ mod tests {
         // The locator only sees differences, so a coset plan agrees with the
         // unshifted plan it was derived from.
         let plan = TransformPlan::<Gf16>::new(8).unwrap();
-        let shifted = crate::shifted::ShiftedPlan::<Gf16>::new(8, fff::gf16::Elem(0x9e3f)).unwrap();
+        let shifted = crate::shifted::ShiftedPlan::<Gf16>::new(8, fgf::gf16::Elem(0x9e3f)).unwrap();
         let known: Vec<bool> = (0..8).map(|index| index % 4 != 1).collect();
         let direct = ErasureLocator::new(&plan, &known).unwrap();
         let coset = ErasureLocator::new(shifted.plan(), &known).unwrap();

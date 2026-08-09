@@ -21,7 +21,7 @@
 
 use ::alloc::vec::Vec;
 
-use fff::field::{Elem, Field};
+use fgf::field::{Elem, Field};
 
 use super::gf2;
 use super::{OrderedBasis, independent};
@@ -122,7 +122,7 @@ where
 mod tests {
     use super::*;
     use crate::core::factors;
-    use fff::{FanPaar8, FanPaar16, Gf8, Gf16, Gf32, Gf64};
+    use fgf::{FanPaar8, FanPaar16, Gf8, Gf16, Gf32, Gf64};
 
     /// Contract: `v_0 = 1` and `v_i² + v_i = v_{i-1}` for every step.
     fn chain_holds<F: Field>() {
