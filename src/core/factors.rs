@@ -107,6 +107,29 @@ pub(crate) fn subspace_polynomials<E: Elem>(
     Some(result)
 }
 
+/// Coefficients of the monic subspace polynomial `W_L` vanishing on
+/// `span(basis)`, at Frobenius positions `x^(2^0) … x^(2^L)` (length `L+1`).
+///
+/// This is one recurrence step beyond [`subspace_polynomials`], which stores
+/// only `W_0 … W_{L-1}` for the butterfly twiddles. The caller must pass a
+/// linearly independent basis (a validated plan guarantees this); a
+/// dependent prefix would hit a zero normalizer and produce a non-monic
+/// result.
+pub(crate) fn monic_subspace_polynomial<E: Elem>(basis: &[E]) -> Vec<E> {
+    let mut coefficients = vec![E::ONE]; // W_0(x) = x
+    for &basis_element in basis {
+        let normalizer = evaluate_linearized(&coefficients, basis_element);
+        // W_{k+1}(x) = W_k(x)^2 + W_k(β_k)·W_k(x).
+        let mut next = vec![E::ZERO; coefficients.len() + 1];
+        for (index, &coefficient) in coefficients.iter().enumerate() {
+            next[index] = next[index].add(scale(normalizer, coefficient));
+            next[index + 1] = next[index + 1].add(coefficient.square());
+        }
+        coefficients = next;
+    }
+    coefficients
+}
+
 /// Fill the twiddle table recursively: node `ν` at depth `dimension` with
 /// coset shift `shift` gets `W̄_dimension(shift)`. The high child shifts the
 /// coset by `β_{dimension-1}`, the basis element splitting this level.

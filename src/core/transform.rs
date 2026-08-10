@@ -63,6 +63,10 @@ pub struct TransformPlan<F: ButterflyKernels> {
     prepared_derivative_factors: Vec<Coeff<F>>,
     /// The ordered-basis prefix `β_0 … β_{log_size-1}` defining the domain.
     basis: Vec<F::Elem>,
+    /// Coset shift `α`: zero for a plain subspace, nonzero for an affine
+    /// coset `α + span(basis)`. Only the twiddle table and the vanishing
+    /// polynomial's constant term depend on it.
+    shift: F::Elem,
 }
 
 /// Validate a requested transform size, returning its base-two logarithm.
@@ -142,13 +146,20 @@ impl<F: ButterflyKernels> TransformPlan<F> {
             log_size,
             table,
             basis[..log_size].to_vec(),
+            shift,
         ))
     }
 
     fn construct(size: usize, log_size: usize, basis: Vec<F::Elem>) -> Result<Self, PlanError> {
         let table =
             FactorTable::build(log_size, &basis, F::Elem::ZERO).ok_or(PlanError::DependentBasis)?;
-        Ok(Self::from_parts(size, log_size, table, basis))
+        Ok(Self::from_parts(
+            size,
+            log_size,
+            table,
+            basis,
+            F::Elem::ZERO,
+        ))
     }
 
     fn from_parts(
@@ -156,6 +167,7 @@ impl<F: ButterflyKernels> TransformPlan<F> {
         log_size: usize,
         table: FactorTable<F>,
         basis: Vec<F::Elem>,
+        shift: F::Elem,
     ) -> Self {
         let prepared_derivative_factors = table
             .derivative_factors
@@ -169,6 +181,7 @@ impl<F: ButterflyKernels> TransformPlan<F> {
             table,
             prepared_derivative_factors,
             basis,
+            shift,
         }
     }
 
@@ -253,6 +266,39 @@ impl<F: ButterflyKernels> TransformPlan<F> {
             remaining &= remaining - 1;
         }
         element
+    }
+
+    /// The coset shift `α` of this plan's domain.
+    ///
+    /// Zero for a plain additive subspace; nonzero for an affine coset
+    /// `α + span(basis)`.
+    #[must_use]
+    pub const fn shift(&self) -> F::Elem {
+        self.shift
+    }
+
+    /// Dense monomial coefficients of the domain vanishing polynomial
+    /// `G(X) = ∏_{α ∈ domain}(X − α)`, low-to-high (length `size + 1`).
+    ///
+    /// For a subspace plan (`shift == 0`) this is the monic subspace
+    /// polynomial `W_L(X)`, whose only nonzero terms are at Frobenius
+    /// degrees `X^(2^j)`. For an affine-coset plan it is the translate
+    /// `W_L(X) + W_L(shift)`, identical except for a nonzero constant term.
+    /// The result is always monic of degree `size`.
+    #[must_use]
+    pub fn vanishing_polynomial(&self) -> Vec<F::Elem> {
+        let sparse = factors::monic_subspace_polynomial(&self.basis);
+        let mut dense = ::alloc::vec![F::Elem::ZERO; self.size + 1];
+        for (exponent, &coefficient) in sparse.iter().enumerate() {
+            dense[1 << exponent] = coefficient;
+        }
+        // Affine coset: G(X) = W_L(X + shift) = W_L(X) + W_L(shift), using
+        // the linearity of the linearized W_L. The subspace case (shift 0)
+        // leaves the constant term zero, since W_L vanishes at the origin.
+        if !self.shift.is_zero() {
+            dense[0] = factors::evaluate_linearized(&sparse, self.shift);
+        }
+        dense
     }
 
     /// Evaluate novel-basis coefficients at the plan's points, in place.
@@ -1061,6 +1107,7 @@ mod tests {
     use crate::core::factors::{
         NormalizedSubspacePolynomial, bit_basis, element_from_index, subspace_polynomials,
     };
+    use ::alloc::vec;
     use fgf::{Gf8, Gf16};
 
     fn lcg(state: &mut u32) -> u32 {
@@ -1593,5 +1640,98 @@ mod tests {
         let plan = TransformPlan::<Gf8>::new(4).unwrap();
         let row_len = 1usize << (usize::BITS - 2);
         let _ = plan.forward_bytes(&mut [], row_len);
+    }
+
+    /// Schoolbook polynomial product over dense monomial coefficients.
+    fn poly_mul<F: ButterflyKernels>(a: &[F::Elem], b: &[F::Elem]) -> Vec<F::Elem> {
+        let mut result = vec![F::Elem::ZERO; a.len() + b.len() - 1];
+        for (i, &ai) in a.iter().enumerate() {
+            for (j, &bj) in b.iter().enumerate() {
+                result[i + j] = result[i + j].add(ai.mul(bj));
+            }
+        }
+        result
+    }
+
+    /// Horner evaluation, independent of the transform.
+    fn horner_eval<F: ButterflyKernels>(coefficients: &[F::Elem], point: F::Elem) -> F::Elem {
+        coefficients
+            .iter()
+            .rev()
+            .fold(F::Elem::ZERO, |acc, &c| acc.mul(point).add(c))
+    }
+
+    /// Incremental `∏(X + point)` — independent oracle for the vanishing
+    /// polynomial.
+    fn product_vanishing<F: ButterflyKernels>(points: &[F::Elem]) -> Vec<F::Elem> {
+        let mut product = vec![F::Elem::ONE];
+        for &point in points {
+            let factor = [point, F::Elem::ONE];
+            product = poly_mul::<F>(&product, &factor);
+        }
+        product
+    }
+
+    #[test]
+    fn vanishing_polynomial_vanishes_on_subspace_and_matches_product() {
+        fn check<F: ButterflyKernels>(_state: &mut u32) {
+            for log_size in 1..=6usize {
+                let size = 1 << log_size;
+                let plan = TransformPlan::<F>::new(size).unwrap();
+                let g = plan.vanishing_polynomial();
+                assert_eq!(g.len(), size + 1, "degree mismatch at size {size}");
+                assert_eq!(g[size], F::Elem::ONE, "not monic at size {size}");
+                for index in 0..size {
+                    assert_eq!(
+                        horner_eval::<F>(&g, plan.point_element(index)),
+                        F::Elem::ZERO,
+                        "G nonzero at point {index} size {size}"
+                    );
+                }
+                let points: Vec<F::Elem> = (0..size).map(|i| plan.point_element(i)).collect();
+                assert_eq!(
+                    g,
+                    product_vanishing::<F>(&points),
+                    "subspace G mismatch size {size}"
+                );
+            }
+        }
+        check::<Gf8>(&mut 11);
+        check::<Gf16>(&mut 13);
+    }
+
+    #[test]
+    fn vanishing_polynomial_vanishes_on_affine_coset_and_matches_product() {
+        fn check<F: ButterflyKernels>(_state: &mut u32) {
+            for log_size in 1..=6usize {
+                let size = 1 << log_size;
+                // A shift outside span(β_0..β_{log_size-1}): the next bit-basis
+                // element, so the coset is distinct from the subspace.
+                let mut shift_bytes = [0u8; 8];
+                shift_bytes[0] = 1 << log_size;
+                let shift = F::read(&shift_bytes[..F::BYTES]);
+                let plan = crate::shifted::ShiftedPlan::<F>::new(size, shift).unwrap();
+                let g = plan.plan().vanishing_polynomial();
+                assert_eq!(g.len(), size + 1);
+                assert_eq!(g[size], F::Elem::ONE, "not monic at size {size}");
+                // Affine coset has a nonzero constant term.
+                assert!(!g[0].is_zero(), "affine G has zero constant at size {size}");
+                for index in 0..size {
+                    assert_eq!(
+                        horner_eval::<F>(&g, plan.point_element(index)),
+                        F::Elem::ZERO,
+                        "affine G nonzero at point {index} size {size}"
+                    );
+                }
+                let points: Vec<F::Elem> = (0..size).map(|i| plan.point_element(i)).collect();
+                assert_eq!(
+                    g,
+                    product_vanishing::<F>(&points),
+                    "affine G mismatch size {size}"
+                );
+            }
+        }
+        check::<Gf8>(&mut 17);
+        check::<Gf16>(&mut 19);
     }
 }

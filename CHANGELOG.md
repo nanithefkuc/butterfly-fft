@@ -5,7 +5,12 @@ All notable changes to butterfly-fft are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 releases follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+
+### Added
+
+- `TransformPlan::vanishing_polynomial` returns the dense monomial
+  coefficients of the domain vanishing polynomial `G(X)` for both subspace and
+  affine-coset domains, and `TransformPlan::shift` exposes the coset shift.
 
 ### Changed
 
