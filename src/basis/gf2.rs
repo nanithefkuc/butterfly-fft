@@ -8,7 +8,7 @@
 
 use ::alloc::vec::Vec;
 
-use fff::field::{Elem, Field};
+use fgf::field::{Elem, Field};
 
 /// The element's GF(2) coordinate vector in the bit basis: exactly its
 /// stable little-endian byte encoding, zero-extended.

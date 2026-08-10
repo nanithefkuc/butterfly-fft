@@ -6,7 +6,7 @@
 //! here — the generator coefficients of one repair point, and a small dense
 //! inverse.
 
-use fff::field::Elem;
+use fgf::field::Elem;
 
 use crate::core::transform::TransformPlan;
 use crate::rs::locator::ErasureLocator;
@@ -127,8 +127,8 @@ pub fn invert_square_into<E: Elem>(
 mod tests {
     use super::*;
     use ::alloc::vec;
-    use fff::field::Field;
-    use fff::{Gf8, Gf16};
+    use fgf::field::Field;
+    use fgf::{Gf8, Gf16};
 
     use crate::rs::locator::SystematicLocators;
 

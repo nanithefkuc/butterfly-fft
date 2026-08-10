@@ -1,5 +1,5 @@
 [package]
-name = "cafft-afft-bench"
+name = "butterfly-fft-bench"
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.89"
@@ -11,10 +11,10 @@ publish = false
 cc = "1"
 
 [dev-dependencies]
-cafft = { path = "../.." }
+butterfly-fft = { path = "../.." }
 additive-fft-reed-solomon = { git = "https://github.com/vkomenda/additive-fft-reed-solomon", rev = "f1bcc91102b74f860c93dcf0b75887ff85755564", features = ["compile_gfni"] }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
-fff = { git = "https://github.com/nanithefkuc/fff.git" }
+fgf = { git = "https://github.com/nanithefkuc/fgf", rev = "d0e331cec2e6ae5645e529597fa913db467a44cd" }
 
 [[bench]]
 name = "raw_afft"

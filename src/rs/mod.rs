@@ -48,8 +48,8 @@ mod tests {
     use ::alloc::vec;
     use ::alloc::vec::Vec;
 
-    use fff::field::{Elem, Field};
-    use fff::{Gf8, Gf16};
+    use fgf::field::{Elem, Field};
+    use fgf::{Gf8, Gf16};
 
     use super::*;
 

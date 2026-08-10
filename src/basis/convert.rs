@@ -17,7 +17,7 @@
 
 use ::alloc::vec;
 
-use fff::field::Elem;
+use fgf::field::Elem;
 
 use crate::core::kernel::{ButterflyKernels, xor_scaled_bytes};
 use crate::core::transform::TransformPlan;
@@ -319,7 +319,7 @@ fn row_range(index: usize, row_len: usize) -> ::core::ops::Range<usize> {
 }
 
 /// Byte-row form of the bottom-up coefficient conversion. Each row operation
-/// runs across every packed lane through fff's dispatched vector primitives.
+/// runs across every packed lane through fgf's dispatched vector primitives.
 fn novel_to_monomial_bytes_node<F: ButterflyKernels>(
     values: &mut [u8],
     row_len: usize,
@@ -422,8 +422,8 @@ mod tests {
     use super::*;
     use crate::basis::{BitBasis, CantorBasis, OrderedBasis};
     use ::alloc::vec::Vec;
-    use fff::field::Field;
-    use fff::{Gf8, Gf16};
+    use fgf::field::Field;
+    use fgf::{Gf8, Gf16};
 
     struct Rng(u64);
 

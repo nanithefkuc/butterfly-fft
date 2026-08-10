@@ -303,8 +303,8 @@ impl<F: ButterflyKernels> StripEncoder<F> {
 mod tests {
     use super::*;
     use ::alloc::vec;
-    use fff::field::Elem;
-    use fff::{Gf8, Gf16};
+    use fgf::field::Elem;
+    use fgf::{Gf8, Gf16};
 
     use crate::rs::locator::SystematicLocators;
     use crate::rs::solve::generator_row;

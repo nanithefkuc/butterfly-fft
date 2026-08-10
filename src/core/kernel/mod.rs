@@ -8,17 +8,25 @@
 //!
 //! ## Backends
 //!
-//! cafft supports a subset of [`fff::kernel::Backend`]: AVX-512 hosts run the
-//! GFNI kernels (AVX-512 detection implies GFNI), and WebAssembly runs scalar
-//! until dedicated `simd128` butterflies exist. GF(2^8) and GF(2^16) have
-//! dedicated kernels on `x86` (GFNI/AVX2/SSSE3) and `AArch64` (NEON); wider
-//! fields always report [`Backend::Scalar`].
+//! `butterfly-fft` supports a subset of [`Backend`] (a re-export of
+//! [`simdispatch::Backend`](https://docs.rs/simdispatch)): the
+//! `v3_gfni_crypto` / `v3` / `v2` tiers on x86 and `neon` / `neon_aes` on
+//! `AArch64` GF(2^8) and GF(2^16) butterflies. WebAssembly runs scalar (no
+//! dedicated `wasm128` butterflies), and wider fields always report
+//! [`Backend::Scalar`]. Detection, ordering, and the downgrade-only override
+//! are single-source: [`Selection`] resolves over [`BUTTERFLY_FFT_TIERS`].
 //!
-//! The process backend may be downgraded at startup via the `CAFFT_BACKEND`
-//! environment variable (`gfni`, `avx2`, `ssse3`, `neon`, `scalar`), applied
-//! after — and independently of — fff's own `FFF_BACKEND`. Requests for a
-//! backend the host cannot run are ignored: running vector code without the
-//! instruction set is undefined behaviour, not a configuration choice.
+//! The process backend may be downgraded at startup via the one stack-wide
+//! `SIMD_BACKEND` environment variable (`v3_gfni_crypto`, `v3`, `v2`,
+//! `neon_aes`, `neon`, `scalar`), owned by `simdispatch` and shared with fgf.
+//! Requests for a backend the host cannot run are ignored: running vector code
+//! without the instruction set is undefined behaviour, not a configuration
+//! choice.
+//!
+//! On an `AArch64` `PMULL` host this resolves to [`Backend::NeonAes`] (the
+//! tier's `aes` feature proves `PMULL`) even though the butterflies run the
+//! NEON kernels — the historical `supported_on_host` had no `PMULL` arm and
+//! silently reported `Neon` (the rot this crate's parent plan deletes).
 
 // Unsafe is expected and confined here: this module owns every intrinsic in
 // the crate, all behind runtime feature detection. The rest of the crate
@@ -33,93 +41,84 @@ mod x86;
 
 use ::core::marker::PhantomData;
 
-use fff::field::Elem;
-use fff::kernel::FieldKernels;
-use fff::{FanPaar8, FanPaar16, FanPaar32, FanPaar64, Gf8, Gf16, Gf32, Gf64};
+use fgf::field::Elem;
+use fgf::kernel::FieldKernels;
+use fgf::{FanPaar8, FanPaar16, FanPaar32, FanPaar64, Gf8, Gf16, Gf32, Gf64};
 
-pub use fff::kernel::Backend;
+// The backend ladder and the downgrade-only override are owned by
+// `simdispatch` (Level 0); fgf re-exports the same ladder, so `Backend`
+// here and `fgf::kernel::Backend` are the same type.
+pub use fgf::kernel::Backend;
 
-#[cfg(feature = "std")]
-static BACKEND: ::std::sync::LazyLock<Backend> = ::std::sync::LazyLock::new(resolve_backend);
+// Only the SIMD resolve path consults the environment: a `simd`-less build
+// reports `Scalar`.
+#[cfg(feature = "simd")]
+use simdispatch::Selection;
 
-/// Map fff's backend onto the set cafft implements.
-const fn cap(backend: Backend) -> Backend {
-    match backend {
-        // cafft uses its 32-byte AVX2+GFNI kernels on AVX-512 hosts. Host
-        // support for both target features is checked separately below.
-        Backend::Avx512 => Backend::Gfni,
-        // No wasm butterflies yet.
-        Backend::Simd128 => Backend::Scalar,
-        other => other,
-    }
-}
+/// The tiers `butterfly-fft` implements butterfly kernels for, in
+/// detection-preference order: the shared ladder minus `V1` (the shuffle
+/// kernels need SSSE3), minus `Wasm128` (no dedicated butterflies), and minus
+/// the deferred 64-byte AVX-512 tier (`V4x`). `AArch64` keeps both `NeonAes`
+/// and `Neon` so `PMULL` hosts resolve to the crypto tier rather than silently
+/// reporting `Neon`.
+pub const BUTTERFLY_FFT_TIERS: &[Backend] = &[
+    Backend::V3GfniCrypto,
+    Backend::V3,
+    Backend::V2,
+    Backend::NeonAes,
+    Backend::Neon,
+    Backend::Scalar,
+];
 
-/// Whether every target feature required by `backend` is available now.
-#[cfg(feature = "std")]
-fn supported_on_host(backend: Backend) -> bool {
-    match backend {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        Backend::Gfni => {
-            ::std::arch::is_x86_feature_detected!("avx2")
-                && ::std::arch::is_x86_feature_detected!("gfni")
-        }
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        Backend::Avx2 => ::std::arch::is_x86_feature_detected!("avx2"),
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        Backend::Ssse3 => ::std::arch::is_x86_feature_detected!("ssse3"),
-        #[cfg(target_arch = "aarch64")]
-        Backend::Neon => ::std::arch::is_aarch64_feature_detected!("neon"),
-        Backend::Scalar => true,
-        _ => false,
-    }
-}
-
-#[cfg(feature = "std")]
-fn resolve_backend() -> Backend {
-    // fff's resolution already honored FFF_BACKEND; cap to cafft's set,
-    // then independently prove every feature required by our target-feature
-    // kernels. Scalar is the safe fallback for unusual feature masks.
-    let detected = cap(fff::kernel::backend());
-    let detected = if supported_on_host(detected) {
-        detected
-    } else {
-        Backend::Scalar
-    };
-    match ::std::env::var("CAFFT_BACKEND") {
-        Ok(name) => match Backend::from_name(name.trim()) {
-            // Downgrade-only: requests must be weaker than the detected set.
-            Some(requested) if supported_on_host(requested) && requested >= detected => requested,
-            _ => detected,
-        },
-        Err(_) => detected,
-    }
-}
-
-/// The backend the butterfly kernels run on, detected once per process.
+/// The backend the butterfly kernels run on, resolved once per process.
 ///
-/// May be downgraded at startup via `CAFFT_BACKEND`; see the module docs.
+/// `simdispatch::Selection` over [`BUTTERFLY_FFT_TIERS`], adjusted by the one
+/// stack-wide `SIMD_BACKEND` downgrade-only override; detected via the single
+/// `archmage` `summon()` probe.
+///
+/// The `LazyLock` caches the resolve so dispatch never touches the
+/// environment per call — a memoized `simdispatch` selection, not a second
+/// resolver.
 #[inline]
 #[must_use]
 pub fn backend() -> Backend {
-    #[cfg(feature = "std")]
+    #[cfg(feature = "simd")]
     {
         *BACKEND
     }
-    #[cfg(not(feature = "std"))]
+    #[cfg(not(feature = "simd"))]
     {
         Backend::Scalar
     }
 }
 
-/// The backend used for field `F`: the process backend capped to what the
-/// field supports. Wider fields always report [`Backend::Scalar`].
+/// Memoized [`Selection`] over [`BUTTERFLY_FFT_TIERS`].
+#[cfg(feature = "simd")]
+static BACKEND: ::std::sync::LazyLock<Backend> = ::std::sync::LazyLock::new(|| {
+    Selection::new("SIMD_BACKEND")
+        .supports(BUTTERFLY_FFT_TIERS)
+        .resolve()
+});
+
+/// The backend used for field `F`: the cached process backend ([`backend()`],
+/// already resolved and override-adjusted over [`BUTTERFLY_FFT_TIERS`]) narrowed
+/// to the tiers that field's butterfly kernels implement
+/// ([`ButterflyKernels::BUTTERFLY_TIERS`]). Wider fields implement none and
+/// always report [`Backend::Scalar`].
+///
+/// The narrowing reads the cached backend rather than re-running `Selection`
+/// (which would touch the environment on every call — an allocation in the
+/// steady-state path); the old weaker-of-two merge against fgf's field cap is
+/// gone.
 #[inline]
 #[must_use]
 pub fn backend_for<F: ButterflyKernels>() -> Backend {
-    let field_cap = cap(fff::kernel::backend_for::<F>());
-    let ours = backend();
-    // fff::kernel::Backend orders weaker backends greater; take the weaker.
-    if ours > field_cap { ours } else { field_cap }
+    let resolved = backend();
+    if F::BUTTERFLY_TIERS.contains(&resolved) {
+        resolved
+    } else {
+        Backend::Scalar
+    }
 }
 
 mod private {
@@ -137,10 +136,10 @@ impl private::Sealed for FanPaar64 {}
 
 /// The per-field butterfly kernel contract.
 ///
-/// Sealed: cafft implements this for fff's fields, and the set of fields
-/// with dedicated SIMD kernels (currently GF(2^8) and GF(2^16)) is fixed by
-/// the implementation. Fields without dedicated kernels inherit the portable
-/// scalar defaults, which is why every transform works over every fff field.
+/// Sealed: `butterfly-fft` implements this for `fgf`'s fields, and the set of
+/// fields with dedicated SIMD kernels (currently GF(2^8) and GF(2^16)) is fixed
+/// by the implementation. Fields without dedicated kernels inherit the portable
+/// scalar defaults, which is why every transform works over every `fgf` field.
 ///
 /// Callers should use the safe wrappers ([`fused_forward`], [`fused_inverse`]
 /// and, in-crate, the backend structs plus the `dispatch_butterfly!`
@@ -152,6 +151,11 @@ impl private::Sealed for FanPaar64 {}
 /// runtime-detected (see [`backend`]); the dispatch layer upholds this by
 /// construction. The scalar defaults are always safe to call.
 pub trait ButterflyKernels: FieldKernels + private::Sealed {
+    /// The tiers this field's butterfly kernels implement, used to narrow
+    /// [`backend_for`]. Only GF(2^8) and GF(2^16) vectorize, so the default
+    /// is scalar-only.
+    const BUTTERFLY_TIERS: &'static [Backend] = &[Backend::Scalar];
+
     /// Fused forward butterfly, AVX2+GFNI kernel.
     ///
     /// # Safety
@@ -230,6 +234,8 @@ pub trait ButterflyKernels: FieldKernels + private::Sealed {
 }
 
 impl ButterflyKernels for Gf8 {
+    const BUTTERFLY_TIERS: &'static [Backend] = BUTTERFLY_FFT_TIERS;
+
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     unsafe fn fused_forward_gfni(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
         // SAFETY: the dispatch layer selects GFNI only after detection.
@@ -280,6 +286,8 @@ impl ButterflyKernels for Gf8 {
 }
 
 impl ButterflyKernels for Gf16 {
+    const BUTTERFLY_TIERS: &'static [Backend] = BUTTERFLY_FFT_TIERS;
+
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     unsafe fn fused_forward_gfni(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
         // SAFETY: the dispatch layer selects GFNI only after detection.
@@ -445,21 +453,23 @@ macro_rules! dispatch_butterfly {
             $crate::core::kernel::Backend::Scalar => {
                 $function::<$field, $crate::core::kernel::ScalarBackend<$field>>($($argument),*)
             }
+            // Both `NeonAes` (AArch64 crypto, PMULL hosts) and `Neon` run the
+            // same NEON butterflies; only the resolved tier label differs.
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            $crate::core::kernel::Backend::NeonAes | $crate::core::kernel::Backend::Neon => {
+                $function::<$field, $crate::core::kernel::NeonBackend<$field>>($($argument),*)
+            }
             #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-            $crate::core::kernel::Backend::Gfni => {
+            $crate::core::kernel::Backend::V3GfniCrypto => {
                 $function::<$field, $crate::core::kernel::GfniBackend<$field>>($($argument),*)
             }
             #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-            $crate::core::kernel::Backend::Avx2 => {
+            $crate::core::kernel::Backend::V3 => {
                 $function::<$field, $crate::core::kernel::Avx2Backend<$field>>($($argument),*)
             }
             #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-            $crate::core::kernel::Backend::Ssse3 => {
+            $crate::core::kernel::Backend::V2 => {
                 $function::<$field, $crate::core::kernel::Ssse3Backend<$field>>($($argument),*)
-            }
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            $crate::core::kernel::Backend::Neon => {
-                $function::<$field, $crate::core::kernel::NeonBackend<$field>>($($argument),*)
             }
             // backend_for never yields a backend outside the cfg'd set; the
             // wildcard only covers `Backend`'s non-exhaustiveness.
@@ -483,7 +493,7 @@ pub(crate) fn fused_forward_with<F: ButterflyKernels, B: ButterflyBackend<F>>(
     debug_assert_eq!(low.len(), high.len());
     debug_assert_eq!(low.len() % F::BYTES, 0);
     if coefficient.is_zero() {
-        fff::ops::add_assign::<F>(high, low);
+        fgf::ops::add_assign::<F>(high, low);
     } else {
         B::forward_nonzero(low, high, coefficient);
     }
@@ -500,7 +510,7 @@ pub(crate) fn fused_inverse_with<F: ButterflyKernels, B: ButterflyBackend<F>>(
     debug_assert_eq!(low.len(), high.len());
     debug_assert_eq!(low.len() % F::BYTES, 0);
     if coefficient.is_zero() {
-        fff::ops::add_assign::<F>(high, low);
+        fgf::ops::add_assign::<F>(high, low);
     } else {
         B::inverse_nonzero(low, high, coefficient);
     }
@@ -547,7 +557,7 @@ pub fn fused_inverse<F: ButterflyKernels>(low: &mut [u8], high: &mut [u8], coeff
 
 /// XOR `coefficient * src` into `dst`, element by element.
 ///
-/// Thin wrapper over [`fff::ops::mul_add`] with the zero/one-coefficient
+/// Thin wrapper over [`fgf::ops::mul_add`] with the zero/one-coefficient
 /// fast paths; the workhorse for coefficient-scaled row accumulation outside
 /// the butterfly recursion.
 ///
@@ -566,10 +576,10 @@ pub fn xor_scaled_bytes<F: ButterflyKernels>(dst: &mut [u8], coefficient: F::Ele
         return;
     }
     if coefficient.is_one() {
-        fff::ops::add_assign::<F>(dst, src);
+        fgf::ops::add_assign::<F>(dst, src);
         return;
     }
-    fff::ops::mul_add::<F>(dst, coefficient, src);
+    fgf::ops::mul_add::<F>(dst, coefficient, src);
 }
 
 /// XOR one source row into every destination row with a distinct coefficient.
@@ -610,17 +620,42 @@ pub fn xor_scaled_bytes_rows<F: ButterflyKernels>(
 mod tests {
     use super::*;
     use ::alloc::vec::Vec;
-    use fff::field::{Elem, Field};
+    use fgf::field::{Elem, Field};
 
-    #[cfg(feature = "std")]
+    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
+    /// Whether the host resolves to one of the tiers in `supported` — the
+    /// shared substitute for the crate's old `supported_on_host` /
+    /// `std::is_*_feature_detected!` test gates. Detection is single-source
+    /// (`simdispatch`), and `SIMD_BACKEND` is honored, so
+    /// `SIMD_BACKEND=scalar` also skips the SIMD kernel tests.
+    fn host_supports(supported: &'static [Backend]) -> bool {
+        simdispatch::Selection::new("SIMD_BACKEND")
+            .supports(supported)
+            .resolve()
+            != Backend::Scalar
+    }
+
     #[test]
-    fn resolved_backend_has_all_required_target_features() {
-        let resolved = backend();
-        assert!(supported_on_host(resolved));
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        if resolved == Backend::Gfni {
-            assert!(::std::arch::is_x86_feature_detected!("avx2"));
-            assert!(::std::arch::is_x86_feature_detected!("gfni"));
+    fn resolved_backend_is_in_supported_tiers() {
+        // The resolution contract: `backend()` and `backend_for::<Gf8/Gf16>`
+        // always land on a tier the crate implements (or Scalar), never a
+        // backend it has no kernels for — the old `cap`-merging rot.
+        assert!(BUTTERFLY_FFT_TIERS.contains(&backend()));
+        assert!(Gf8::BUTTERFLY_TIERS.contains(&backend_for::<Gf8>()));
+        assert!(Gf16::BUTTERFLY_TIERS.contains(&backend_for::<Gf16>()));
+        // Wider fields have no butterfly kernels: always Scalar.
+        assert_eq!(backend_for::<Gf32>(), Backend::Scalar);
+        assert_eq!(backend_for::<FanPaar64>(), Backend::Scalar);
+    }
+
+    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
+    #[test]
+    fn x86_gfni_resolution_implies_host_features() {
+        // The summon() proof is simdispatch's; here we only sanity-check the
+        // self-consistency a resolved GFNI tier implies the host really has
+        // AVX2+GFNI (garble guard for the selection wiring).
+        if backend() == Backend::V3GfniCrypto {
+            assert!(host_supports(&[Backend::V3GfniCrypto]));
         }
     }
 
@@ -657,27 +692,27 @@ mod tests {
 
     #[test]
     fn scalar_roundtrip_gf8() {
-        let coefficients = [0x00, 0x01, 0x02, 0x03, 0x53, 0xff].map(fff::gf8::Elem);
+        let coefficients = [0x00, 0x01, 0x02, 0x03, 0x53, 0xff].map(fgf::gf8::Elem);
         scalar_roundtrip::<Gf8>(&coefficients);
     }
 
     #[test]
     fn scalar_roundtrip_gf16() {
-        let coefficients = [0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fff::gf16::Elem);
+        let coefficients = [0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fgf::gf16::Elem);
         scalar_roundtrip::<Gf16>(&coefficients);
     }
 
     #[test]
     fn scalar_forward_matches_element_math_gf8() {
-        for coefficient in [0x00, 0x01, 0x03, 0xff].map(fff::gf8::Elem) {
+        for coefficient in [0x00, 0x01, 0x03, 0xff].map(fgf::gf8::Elem) {
             for len in lengths(1) {
                 let low = pattern(0x3d, len);
                 let high = pattern(0xc2, len);
                 let mut expected_low = low.clone();
                 let mut expected_high = high.clone();
                 for (l, h) in expected_low.iter_mut().zip(&mut expected_high) {
-                    let lo = fff::gf8::Elem(*l);
-                    let hi = fff::gf8::Elem(*h);
+                    let lo = fgf::gf8::Elem(*l);
+                    let hi = fgf::gf8::Elem(*h);
                     let new_low = lo.add(coefficient.mul(hi));
                     *l = new_low.0;
                     *h = hi.add(new_low).0;
@@ -692,7 +727,7 @@ mod tests {
 
     #[test]
     fn scalar_forward_matches_element_math_gf16() {
-        for coefficient in [0x0000, 0x0001, 0x0108, 0xbeef].map(fff::gf16::Elem) {
+        for coefficient in [0x0000, 0x0001, 0x0108, 0xbeef].map(fgf::gf16::Elem) {
             for len in lengths(2) {
                 let low = pattern(0x3d, len);
                 let high = pattern(0xc2, len);
@@ -732,8 +767,8 @@ mod tests {
                 }
             }
         }
-        check::<Gf8>(&[0x00, 0x01, 0x53, 0xff].map(fff::gf8::Elem));
-        check::<Gf16>(&[0x0000, 0x0001, 0x0108, 0x9b37].map(fff::gf16::Elem));
+        check::<Gf8>(&[0x00, 0x01, 0x53, 0xff].map(fgf::gf8::Elem));
+        check::<Gf16>(&[0x0000, 0x0001, 0x0108, 0x9b37].map(fgf::gf16::Elem));
     }
 
     #[test]
@@ -773,12 +808,12 @@ mod tests {
                 assert_eq!(dst, expected);
             }
         }
-        check::<Gf8>(fff::gf8::Elem(0x53));
-        check::<Gf8>(fff::gf8::Elem(0x00));
-        check::<Gf8>(fff::gf8::Elem(0x01));
-        check::<Gf16>(fff::gf16::Elem(0x9b37));
-        check::<Gf16>(fff::gf16::Elem(0x0000));
-        check::<Gf16>(fff::gf16::Elem(0x0001));
+        check::<Gf8>(fgf::gf8::Elem(0x53));
+        check::<Gf8>(fgf::gf8::Elem(0x00));
+        check::<Gf8>(fgf::gf8::Elem(0x01));
+        check::<Gf16>(fgf::gf16::Elem(0x9b37));
+        check::<Gf16>(fgf::gf16::Elem(0x0000));
+        check::<Gf16>(fgf::gf16::Elem(0x0001));
     }
 
     #[test]
@@ -801,8 +836,8 @@ mod tests {
             assert_eq!(destinations, expected);
         }
 
-        check::<Gf8>(&[0x00, 0x01, 0x53, 0xff].map(fff::gf8::Elem));
-        check::<Gf16>(&[0x0000, 0x0001, 0x9b37, 0xffff].map(fff::gf16::Elem));
+        check::<Gf8>(&[0x00, 0x01, 0x53, 0xff].map(fgf::gf8::Elem));
+        check::<Gf16>(&[0x0000, 0x0001, 0x9b37, 0xffff].map(fgf::gf16::Elem));
     }
 
     /// Compare one concrete SIMD backend against the scalar reference in
@@ -856,15 +891,13 @@ mod tests {
 
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     fn differential_x86<F: ButterflyKernels>(coefficients: &[F::Elem]) {
-        if ::std::arch::is_x86_feature_detected!("avx2")
-            && ::std::arch::is_x86_feature_detected!("gfni")
-        {
+        if host_supports(&[Backend::V3GfniCrypto]) {
             differential_backend::<F, GfniBackend<F>>("gfni", coefficients);
         }
-        if ::std::arch::is_x86_feature_detected!("avx2") {
+        if host_supports(&[Backend::V3]) {
             differential_backend::<F, Avx2Backend<F>>("avx2", coefficients);
         }
-        if ::std::arch::is_x86_feature_detected!("ssse3") {
+        if host_supports(&[Backend::V2]) {
             differential_backend::<F, Ssse3Backend<F>>("ssse3", coefficients);
         }
     }
@@ -872,8 +905,8 @@ mod tests {
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     #[test]
     fn x86_backends_match_scalar_in_both_directions() {
-        differential_x86::<Gf8>(&[0x00, 0x01, 0x02, 0x53, 0xff].map(fff::gf8::Elem));
-        differential_x86::<Gf16>(&[0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fff::gf16::Elem));
+        differential_x86::<Gf8>(&[0x00, 0x01, 0x02, 0x53, 0xff].map(fgf::gf8::Elem));
+        differential_x86::<Gf16>(&[0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fgf::gf16::Elem));
     }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -881,11 +914,11 @@ mod tests {
     fn neon_backends_match_scalar_in_both_directions() {
         differential_backend::<Gf8, NeonBackend<Gf8>>(
             "neon",
-            &[0x00, 0x01, 0x02, 0x53, 0xff].map(fff::gf8::Elem),
+            &[0x00, 0x01, 0x02, 0x53, 0xff].map(fgf::gf8::Elem),
         );
         differential_backend::<Gf16, NeonBackend<Gf16>>(
             "neon",
-            &[0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fff::gf16::Elem),
+            &[0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fgf::gf16::Elem),
         );
     }
 }

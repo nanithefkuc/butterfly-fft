@@ -4,7 +4,7 @@
 //! SIMD-batched butterfly kernels, and in-place transform execution models,
 //! plus the extended basis/shifted/truncated APIs its codec consumers need.
 //!
-//! Field arithmetic and byte-buffer vector primitives come from [`fff`];
+//! Field arithmetic and byte-buffer vector primitives come from [`fgf`];
 //! this crate never re-implements field arithmetic. Consumers own wire
 //! formats, codec shells, and evaluation-point ↔ wire-index maps.
 //!

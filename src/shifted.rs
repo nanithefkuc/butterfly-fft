@@ -23,9 +23,9 @@
 //! hold its `ShiftedPlan`.
 //!
 //! ```
-//! use cafft::basis::{BitBasis, OrderedBasis};
-//! use cafft::shifted::ShiftedPlan;
-//! use fff::{Gf16, field::Elem, gf16};
+//! use butterfly_fft::basis::{BitBasis, OrderedBasis};
+//! use butterfly_fft::shifted::ShiftedPlan;
+//! use fgf::{Gf16, field::Elem, gf16};
 //!
 //! // Evaluate over the coset α + span{β_0, β_1}.
 //! let shift = gf16::Elem(0x2ba7);
@@ -42,7 +42,7 @@
 use ::alloc::vec::Vec;
 use ::core::ops::Range;
 
-use fff::field::Elem;
+use fgf::field::Elem;
 
 use crate::basis::{BitBasis, OrderedBasis};
 use crate::core::kernel::ButterflyKernels;
@@ -333,8 +333,8 @@ mod tests {
     use super::*;
     use crate::basis::{CantorBasis, novel_to_monomial};
     use ::alloc::vec;
-    use fff::field::Field;
-    use fff::{Gf8, Gf16};
+    use fgf::field::Field;
+    use fgf::{Gf8, Gf16};
 
     struct Rng(u64);
 

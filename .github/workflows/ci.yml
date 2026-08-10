@@ -34,16 +34,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --all-features
         env:
-          CAFFT_BACKEND: gfni
+          SIMD_BACKEND: v3_gfni_crypto
       - run: cargo test --all-features
         env:
-          CAFFT_BACKEND: avx2
+          SIMD_BACKEND: v3
       - run: cargo test --all-features
         env:
-          CAFFT_BACKEND: ssse3
+          SIMD_BACKEND: v2
       - run: cargo test --all-features
         env:
-          CAFFT_BACKEND: scalar
+          SIMD_BACKEND: scalar
 
   cross:
     name: build ${{ matrix.target }}

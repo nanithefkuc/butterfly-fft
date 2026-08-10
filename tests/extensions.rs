@@ -4,20 +4,20 @@
 //!
 //! A consumer holds a polynomial in the **monomial** basis and an
 //! **arbitrary affine subspace** `α + span(δ)` of the field, and wants its
-//! values at every point of that subspace in `O(n log n)`. cafft expresses
+//! values at every point of that subspace in `O(n log n)`. butterfly-fft expresses
 //! that as: convert the coefficients to the novel basis over `δ`, then run
 //! a shifted forward transform. Nothing here evaluates point by point.
 //!
 //! Ground truth throughout is Horner over the monomial coefficients, which
 //! shares no code with the transform.
 
-use cafft::basis::{
+use butterfly_fft::basis::{
     BitBasis, CantorBasis, CoordinateMap, OrderedBasis, monomial_to_novel, novel_to_monomial,
 };
-use cafft::core::transform::TransformPlan;
-use cafft::shifted::ShiftedPlan;
-use fff::field::{Elem, Field};
-use fff::{Gf8, Gf16};
+use butterfly_fft::core::transform::TransformPlan;
+use butterfly_fft::shifted::ShiftedPlan;
+use fgf::field::{Elem, Field};
+use fgf::{Gf8, Gf16};
 
 struct Rng(u64);
 
@@ -74,7 +74,7 @@ fn random_subspace<F: Field>(rng: &mut Rng, dimension: usize) -> (Vec<F::Elem>, 
 
 /// **The acceptance scenario.** Evaluate a monomial-basis polynomial over an
 /// arbitrary affine subspace via convert → shifted forward.
-fn evaluate_over_affine_subspace<F: cafft::core::kernel::ButterflyKernels>(seed: u64) {
+fn evaluate_over_affine_subspace<F: butterfly_fft::core::kernel::ButterflyKernels>(seed: u64) {
     let mut rng = Rng(seed);
     for dimension in 1..=7usize {
         let size = 1 << dimension;

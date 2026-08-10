@@ -38,27 +38,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
+name = "archmage"
+version = "0.9.28"
+source = "git+https://github.com/nanithefkuc/archmage?rev=de519319b5670d93f71dada4c49cdfd83c0fc0ec#de519319b5670d93f71dada4c49cdfd83c0fc0ec"
+dependencies = [
+ "archmage-macros",
+ "safe_unaligned_simd",
+ "winarm-cpufeatures",
+]
+
+[[package]]
+name = "archmage-macros"
+version = "0.9.28"
+source = "git+https://github.com/nanithefkuc/archmage?rev=de519319b5670d93f71dada4c49cdfd83c0fc0ec#de519319b5670d93f71dada4c49cdfd83c0fc0ec"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "cafft"
+name = "butterfly-fft"
 version = "0.1.1"
 dependencies = [
- "fff",
+ "fgf",
+ "simdispatch",
 ]
 
 [[package]]
-name = "cafft-afft-bench"
+name = "butterfly-fft-bench"
 version = "0.0.0"
 dependencies = [
  "additive-fft-reed-solomon",
- "cafft",
+ "butterfly-fft",
  "cc",
  "criterion",
- "fff",
+ "fgf",
 ]
 
 [[package]]
@@ -182,9 +203,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
-name = "fff"
-version = "0.1.1"
-source = "git+https://github.com/nanithefkuc/fff.git#d138202bc251cab007567d3b463dacea39c4feea"
+name = "fgf"
+version = "0.3.0"
+source = "git+https://github.com/nanithefkuc/fgf?rev=d0e331cec2e6ae5645e529597fa913db467a44cd#d0e331cec2e6ae5645e529597fa913db467a44cd"
+dependencies = [
+ "simdispatch",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -316,6 +340,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "safe_unaligned_simd"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9c874fb993656d484725d58fbfddb39dfcf98ebcadc1a1d09568aa6b39bafba"
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -374,6 +404,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "simdispatch"
+version = "0.0.0"
+source = "git+https://github.com/nanithefkuc/simdispatch?rev=5940194107384953cd8cd9f45c8d902b26d5686e#5940194107384953cd8cd9f45c8d902b26d5686e"
+dependencies = [
+ "archmage",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -429,6 +467,12 @@ checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
  "windows-sys",
 ]
+
+[[package]]
+name = "winarm-cpufeatures"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d107c80dd656e1a2c254dfb1d57ece73b7f515b8a8684c270c23cab68f4a440d"
 
 [[package]]
 name = "windows-link"

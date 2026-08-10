@@ -1,6 +1,6 @@
 //! The engine: twiddle tables, butterfly kernels, execution models.
 //!
-//! Generic over [`fff::field::Field`]. GF(2^8) and GF(2^16) carry dedicated
+//! Generic over [`fgf::field::Field`]. GF(2^8) and GF(2^16) carry dedicated
 //! SIMD butterfly backends; wider fields use the portable scalar backend.
 //!
 //! - `factors` — normalized subspace polynomials and the per-node twiddle

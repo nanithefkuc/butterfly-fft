@@ -19,7 +19,7 @@
 
 use ::alloc::{vec, vec::Vec};
 
-use fff::field::{Elem, Field};
+use fgf::field::{Elem, Field};
 
 /// A normalized subspace polynomial, stored as the coefficients of `x^(2^j)`
 /// (low `j` first) plus the inverse of the normalizer `W_k(β_k)`.
@@ -244,7 +244,7 @@ pub(crate) fn linearly_independent<F: Field>(elements: &[F::Elem]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fff::{Gf8, Gf16};
+    use fgf::{Gf8, Gf16};
 
     /// Ground truth: `W̄_k` vanishes on every point of `V_k`.
     fn vanishes_on_subspace<F: Field>() {

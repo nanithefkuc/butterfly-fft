@@ -16,10 +16,10 @@
 //!   several levels deep, where the scratch-based tail subtraction runs.
 //! - **Sub-ranges of the high coset**, not just the whole half.
 
-use cafft::core::kernel::ButterflyKernels;
-use cafft::core::transform::TransformPlan;
-use fff::field::{Elem, Field};
-use fff::{Gf8, Gf16};
+use butterfly_fft::core::kernel::ButterflyKernels;
+use butterfly_fft::core::transform::TransformPlan;
+use fgf::field::{Elem, Field};
+use fgf::{Gf8, Gf16};
 
 /// Deterministic per-test element stream.
 struct Rng(u64);
@@ -324,7 +324,7 @@ fn scratch_sizing_is_tight() {
 #[cfg(feature = "internals")]
 #[test]
 fn unstable_factor_table_surface_is_read_only() {
-    use cafft::internals::FactorTable;
+    use butterfly_fft::internals::FactorTable;
 
     let plan = TransformPlan::<Gf16>::new(64).unwrap();
     let table: &FactorTable<Gf16> = plan.table();
