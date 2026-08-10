@@ -197,6 +197,32 @@ pub fn monomial_to_novel_bytes<F: ButterflyKernels>(
     Ok(())
 }
 
+/// Interpolate domain evaluations into monomial coefficients in place.
+///
+/// Composes [`TransformPlan::inverse_bytes`] with
+/// [`novel_to_monomial_bytes`]: each `row_len`-byte row `i` starts as the
+/// evaluation at the plan's point `i` and ends as the monomial coefficient
+/// of `x^i` of the unique degree-`< plan.size()` interpolating polynomial.
+/// Multiple independent polynomials may be packed across each byte row.
+///
+/// `scratch` must hold at least `plan.size() / 2` rows of `row_len` bytes
+/// (see [`conversion_scratch_elements`]).
+///
+/// # Errors
+/// As [`TransformPlan::inverse_bytes`] and [`novel_to_monomial_bytes`].
+///
+/// # Panics
+/// As those functions.
+pub fn inverse_interpolate_bytes<F: ButterflyKernels>(
+    rows: &mut [u8],
+    row_len: usize,
+    plan: &TransformPlan<F>,
+    scratch: &mut [u8],
+) -> Result<(), TransformLengthError> {
+    plan.inverse_bytes(rows, row_len)?;
+    novel_to_monomial_bytes(rows, row_len, plan, scratch)
+}
+
 fn check_len(got: usize, expected: usize) -> Result<(), TransformLengthError> {
     if got == expected {
         Ok(())
@@ -742,5 +768,76 @@ mod tests {
     fn overflowing_byte_geometry_panics_before_execution() {
         let plan = TransformPlan::<Gf16>::new(8).unwrap();
         novel_to_monomial_bytes(&mut [], usize::MAX - 1, &plan, &mut []).unwrap();
+    }
+
+    #[test]
+    fn inverse_interpolate_recovers_monomial_coefficients() {
+        fn check<F: ButterflyKernels>(rng: &mut Rng) {
+            for log_size in 1..=7usize {
+                let size = 1 << log_size;
+                let plan = TransformPlan::<F>::new(size).unwrap();
+                let evaluations = rng.elems::<F>(size);
+                let row_len = F::BYTES;
+                let mut rows = vec![0u8; size * row_len];
+                for (point, &evaluation) in evaluations.iter().enumerate() {
+                    F::write(
+                        &mut rows[point * row_len..(point + 1) * row_len],
+                        evaluation,
+                    );
+                }
+                let mut scratch = vec![0u8; conversion_scratch_elements(size) * row_len];
+                inverse_interpolate_bytes(&mut rows, row_len, &plan, &mut scratch).unwrap();
+                let monomial: Vec<F::Elem> = (0..size)
+                    .map(|degree| F::read(&rows[degree * row_len..(degree + 1) * row_len]))
+                    .collect();
+                for (point, &evaluation) in evaluations.iter().enumerate() {
+                    assert_eq!(
+                        horner(&monomial, plan.point_element(point)),
+                        evaluation,
+                        "R(point) != received at size {size} point {point}"
+                    );
+                }
+            }
+        }
+        let mut rng = Rng(0x9e37_79b9);
+        check::<Gf8>(&mut rng);
+        check::<Gf16>(&mut rng);
+    }
+
+    #[test]
+    fn inverse_interpolate_handles_affine_coset() {
+        fn check<F: ButterflyKernels>(rng: &mut Rng) {
+            for log_size in 1..=6usize {
+                let size = 1 << log_size;
+                let mut shift_bytes = [0u8; 8];
+                shift_bytes[0] = 1 << log_size;
+                let shift = F::read(&shift_bytes[..F::BYTES]);
+                let plan = crate::shifted::ShiftedPlan::<F>::new(size, shift).unwrap();
+                let evaluations = rng.elems::<F>(size);
+                let row_len = F::BYTES;
+                let mut rows = vec![0u8; size * row_len];
+                for (point, &evaluation) in evaluations.iter().enumerate() {
+                    F::write(
+                        &mut rows[point * row_len..(point + 1) * row_len],
+                        evaluation,
+                    );
+                }
+                let mut scratch = vec![0u8; conversion_scratch_elements(size) * row_len];
+                inverse_interpolate_bytes(&mut rows, row_len, plan.plan(), &mut scratch).unwrap();
+                let monomial: Vec<F::Elem> = (0..size)
+                    .map(|degree| F::read(&rows[degree * row_len..(degree + 1) * row_len]))
+                    .collect();
+                for (point, &evaluation) in evaluations.iter().enumerate() {
+                    assert_eq!(
+                        horner(&monomial, plan.point_element(point)),
+                        evaluation,
+                        "affine R(point) != received at size {size} point {point}"
+                    );
+                }
+            }
+        }
+        let mut rng = Rng(0x6c62_2c73);
+        check::<Gf8>(&mut rng);
+        check::<Gf16>(&mut rng);
     }
 }
