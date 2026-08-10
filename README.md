@@ -1,3 +1,8 @@
+> [!WARNING]
+> This library was made with the help of AI. While the library has tests
+> to check for regressions, things may break. Audit the code yourself, or with
+> your own agent before using.
+
 # cafft
 
 **Common Additive Fast Fourier Transform** — a shared additive-FFT engine over
