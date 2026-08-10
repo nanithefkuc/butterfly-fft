@@ -6,7 +6,7 @@
 static struct oblas16_impl field_impl;
 static struct oblas16_afft_impl afft_impl;
 
-void cafft_nanors_init(void)
+void butterfly_fft_nanors_init(void)
 {
 #if defined(OBLAS_ARCH_X86) && !defined(_MSC_VER)
     __builtin_cpu_init();
@@ -16,7 +16,7 @@ void cafft_nanors_init(void)
     oblas16_afft_get_impl(&afft_impl);
 }
 
-const char *cafft_nanors_backend(void)
+const char *butterfly_fft_nanors_backend(void)
 {
 #if defined(OBLAS_ARCH_X86)
     if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("gfni"))
@@ -41,7 +41,7 @@ const char *cafft_nanors_backend(void)
 #endif
 }
 
-void cafft_nanors_forward(uint8_t *rows, unsigned log_points, unsigned row_len)
+void butterfly_fft_nanors_forward(uint8_t *rows, unsigned log_points, unsigned row_len)
 {
     oblas16_afft_fft(
         (uint16_t *)rows,
@@ -53,7 +53,7 @@ void cafft_nanors_forward(uint8_t *rows, unsigned log_points, unsigned row_len)
         &afft_impl);
 }
 
-void cafft_nanors_inverse(uint8_t *rows, unsigned log_points, unsigned row_len)
+void butterfly_fft_nanors_inverse(uint8_t *rows, unsigned log_points, unsigned row_len)
 {
     oblas16_afft_ifft(
         (uint16_t *)rows,

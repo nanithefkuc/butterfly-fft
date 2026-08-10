@@ -7,7 +7,7 @@
 //! novel-basis formal derivative.
 //!
 //! ```
-//! use cafft::core::transform::TransformPlan;
+//! use butterfly_fft::core::transform::TransformPlan;
 //! use fgf::{Gf16, gf16};
 //!
 //! let plan = TransformPlan::<Gf16>::new(4).unwrap();

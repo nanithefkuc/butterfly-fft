@@ -1,4 +1,4 @@
-//! Acceptance coverage for `cafft::rs`, through the public API only.
+//! Acceptance coverage for `butterfly_fft::rs`, through the public API only.
 //!
 //! The gate for the RS helpers is standalone property coverage on randomized
 //! erasure patterns: encode a block, drop an arbitrary tolerable subset of
@@ -12,9 +12,9 @@
 
 #![cfg(feature = "rs")]
 
-use cafft::core::kernel::xor_scaled_bytes_rows;
-use cafft::core::transform::TransformPlan;
-use cafft::rs::{
+use butterfly_fft::core::kernel::xor_scaled_bytes_rows;
+use butterfly_fft::core::transform::TransformPlan;
+use butterfly_fft::rs::{
     ErasureLocator, LocatorScratch, RecoveryScratch, RsField, StripEncoder, SystematicLocators,
     generator_row, inverse_scratch_elements, invert_square_into, recover_rows,
 };
@@ -337,7 +337,7 @@ fn locator_recovery_survives_a_shifted_domain() {
     // decodes with the same tables. Build a codeword over a coset, erase
     // half of it, recover.
     let shift = fgf::gf16::Elem(0x4d21);
-    let shifted = cafft::shifted::ShiftedPlan::<Gf16>::new(16, shift).unwrap();
+    let shifted = butterfly_fft::shifted::ShiftedPlan::<Gf16>::new(16, shift).unwrap();
     let plan = shifted.plan();
     let row_len = 4;
     let active = 8;

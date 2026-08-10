@@ -94,7 +94,7 @@ fn compile_leopard(manifest: &Path, source: &Path) {
         build.flag_if_supported("-mssse3");
         build.flag_if_supported("-mavx2");
     }
-    build.compile("cafft_leopard_adapter");
+    build.compile("butterfly_fft_leopard_adapter");
 }
 
 fn compile_nanors(manifest: &Path, source: &Path) {
@@ -109,7 +109,7 @@ fn compile_nanors(manifest: &Path, source: &Path) {
         .file(obl.join("oblas16.c"))
         .file(obl.join("oblas16_afft.c"))
         .file(manifest.join("native/nanors_adapter.c"))
-        .compile("cafft_nanors_adapter");
+        .compile("butterfly_fft_nanors_adapter");
 }
 
 fn main() {

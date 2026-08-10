@@ -6,13 +6,13 @@
 
 namespace leopard { namespace ff16 {
 
-extern "C" bool cafft_leopard_init()
+extern "C" bool butterfly_fft_leopard_init()
 {
     InitializeCPUArch();
     return Initialize();
 }
 
-extern "C" const char* cafft_leopard_backend()
+extern "C" const char* butterfly_fft_leopard_backend()
 {
 #if defined(LEO_TRY_AVX2)
     if (CpuHasAVX2)
@@ -23,17 +23,17 @@ extern "C" const char* cafft_leopard_backend()
     return "scalar";
 }
 
-extern "C" void cafft_leopard_forward(void** rows, unsigned points, uint64_t row_len)
+extern "C" void butterfly_fft_leopard_forward(void** rows, unsigned points, uint64_t row_len)
 {
     FFT_DIT(row_len, rows, points, points, FFTSkew - 1);
 }
 
-extern "C" void cafft_leopard_inverse(void** rows, unsigned points, uint64_t row_len)
+extern "C" void butterfly_fft_leopard_inverse(void** rows, unsigned points, uint64_t row_len)
 {
     IFFT_DIT_Decoder(row_len, points, rows, points, FFTSkew - 1);
 }
 
-extern "C" void cafft_leopard_derivative(void** rows, unsigned points, uint64_t row_len)
+extern "C" void butterfly_fft_leopard_derivative(void** rows, unsigned points, uint64_t row_len)
 {
     for (unsigned i = 1; i < points; ++i)
     {

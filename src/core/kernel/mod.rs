@@ -8,13 +8,13 @@
 //!
 //! ## Backends
 //!
-//! cafft supports a subset of [`Backend`] (a re-export of
+//! `butterfly-fft` supports a subset of [`Backend`] (a re-export of
 //! [`simdispatch::Backend`](https://docs.rs/simdispatch)): the
 //! `v3_gfni_crypto` / `v3` / `v2` tiers on x86 and `neon` / `neon_aes` on
 //! `AArch64` GF(2^8) and GF(2^16) butterflies. WebAssembly runs scalar (no
 //! dedicated `wasm128` butterflies), and wider fields always report
 //! [`Backend::Scalar`]. Detection, ordering, and the downgrade-only override
-//! are single-source: [`Selection`] resolves over [`CAFFT_TIERS`].
+//! are single-source: [`Selection`] resolves over [`BUTTERFLY_FFT_TIERS`].
 //!
 //! The process backend may be downgraded at startup via the one stack-wide
 //! `SIMD_BACKEND` environment variable (`v3_gfni_crypto`, `v3`, `v2`,
@@ -55,12 +55,13 @@ pub use fgf::kernel::Backend;
 #[cfg(feature = "simd")]
 use simdispatch::Selection;
 
-/// The tiers cafft implements butterfly kernels for, in detection-preference
-/// order: the shared ladder minus `V1` (the shuffle kernels need SSSE3), minus
-/// `Wasm128` (no dedicated butterflies), and minus the deferred 64-byte
-/// AVX-512 tier (`V4x`). `AArch64` keeps both `NeonAes` and `Neon` so `PMULL`
-/// hosts resolve to the crypto tier rather than silently reporting `Neon`.
-pub const CAFFT_TIERS: &[Backend] = &[
+/// The tiers `butterfly-fft` implements butterfly kernels for, in
+/// detection-preference order: the shared ladder minus `V1` (the shuffle
+/// kernels need SSSE3), minus `Wasm128` (no dedicated butterflies), and minus
+/// the deferred 64-byte AVX-512 tier (`V4x`). `AArch64` keeps both `NeonAes`
+/// and `Neon` so `PMULL` hosts resolve to the crypto tier rather than silently
+/// reporting `Neon`.
+pub const BUTTERFLY_FFT_TIERS: &[Backend] = &[
     Backend::V3GfniCrypto,
     Backend::V3,
     Backend::V2,
@@ -71,9 +72,9 @@ pub const CAFFT_TIERS: &[Backend] = &[
 
 /// The backend the butterfly kernels run on, resolved once per process.
 ///
-/// `simdispatch::Selection` over [`CAFFT_TIERS`], adjusted by the one
-/// stack-wide `SIMD_BACKEND` downgrade-only override; detected via the
-/// single `archmage` `summon()` probe.
+/// `simdispatch::Selection` over [`BUTTERFLY_FFT_TIERS`], adjusted by the one
+/// stack-wide `SIMD_BACKEND` downgrade-only override; detected via the single
+/// `archmage` `summon()` probe.
 ///
 /// The `LazyLock` caches the resolve so dispatch never touches the
 /// environment per call — a memoized `simdispatch` selection, not a second
@@ -91,17 +92,17 @@ pub fn backend() -> Backend {
     }
 }
 
-/// Memoized [`Selection`] over [`CAFFT_TIERS`].
+/// Memoized [`Selection`] over [`BUTTERFLY_FFT_TIERS`].
 #[cfg(feature = "simd")]
 static BACKEND: ::std::sync::LazyLock<Backend> = ::std::sync::LazyLock::new(|| {
     Selection::new("SIMD_BACKEND")
-        .supports(CAFFT_TIERS)
+        .supports(BUTTERFLY_FFT_TIERS)
         .resolve()
 });
 
 /// The backend used for field `F`: the cached process backend ([`backend()`],
-/// already resolved and override-adjusted over [`CAFFT_TIERS`]) narrowed to
-/// the tiers that field's butterfly kernels implement
+/// already resolved and override-adjusted over [`BUTTERFLY_FFT_TIERS`]) narrowed
+/// to the tiers that field's butterfly kernels implement
 /// ([`ButterflyKernels::BUTTERFLY_TIERS`]). Wider fields implement none and
 /// always report [`Backend::Scalar`].
 ///
@@ -135,10 +136,10 @@ impl private::Sealed for FanPaar64 {}
 
 /// The per-field butterfly kernel contract.
 ///
-/// Sealed: cafft implements this for fgf's fields, and the set of fields
-/// with dedicated SIMD kernels (currently GF(2^8) and GF(2^16)) is fixed by
-/// the implementation. Fields without dedicated kernels inherit the portable
-/// scalar defaults, which is why every transform works over every fgf field.
+/// Sealed: `butterfly-fft` implements this for `fgf`'s fields, and the set of
+/// fields with dedicated SIMD kernels (currently GF(2^8) and GF(2^16)) is fixed
+/// by the implementation. Fields without dedicated kernels inherit the portable
+/// scalar defaults, which is why every transform works over every `fgf` field.
 ///
 /// Callers should use the safe wrappers ([`fused_forward`], [`fused_inverse`]
 /// and, in-crate, the backend structs plus the `dispatch_butterfly!`
@@ -233,7 +234,7 @@ pub trait ButterflyKernels: FieldKernels + private::Sealed {
 }
 
 impl ButterflyKernels for Gf8 {
-    const BUTTERFLY_TIERS: &'static [Backend] = CAFFT_TIERS;
+    const BUTTERFLY_TIERS: &'static [Backend] = BUTTERFLY_FFT_TIERS;
 
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     unsafe fn fused_forward_gfni(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
@@ -285,7 +286,7 @@ impl ButterflyKernels for Gf8 {
 }
 
 impl ButterflyKernels for Gf16 {
-    const BUTTERFLY_TIERS: &'static [Backend] = CAFFT_TIERS;
+    const BUTTERFLY_TIERS: &'static [Backend] = BUTTERFLY_FFT_TIERS;
 
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     unsafe fn fused_forward_gfni(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
@@ -638,7 +639,7 @@ mod tests {
         // The resolution contract: `backend()` and `backend_for::<Gf8/Gf16>`
         // always land on a tier the crate implements (or Scalar), never a
         // backend it has no kernels for — the old `cap`-merging rot.
-        assert!(CAFFT_TIERS.contains(&backend()));
+        assert!(BUTTERFLY_FFT_TIERS.contains(&backend()));
         assert!(Gf8::BUTTERFLY_TIERS.contains(&backend_for::<Gf8>()));
         assert!(Gf16::BUTTERFLY_TIERS.contains(&backend_for::<Gf16>()));
         // Wider fields have no butterfly kernels: always Scalar.

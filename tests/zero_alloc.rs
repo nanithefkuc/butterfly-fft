@@ -9,11 +9,11 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use cafft::basis::{
+use butterfly_fft::basis::{
     conversion_scratch_elements, monomial_to_novel_bytes, monomial_to_novel_with_scratch,
     novel_to_monomial_bytes, novel_to_monomial_with_scratch,
 };
-use cafft::core::transform::TransformPlan;
+use butterfly_fft::core::transform::TransformPlan;
 use fgf::{Gf8, Gf16};
 
 struct Counting;
@@ -58,7 +58,7 @@ fn count_allocations(body: impl FnOnce()) -> usize {
     ALLOCATIONS.load(Ordering::Relaxed)
 }
 
-fn check_field<F: cafft::core::kernel::ButterflyKernels>(log_size: usize, row_len: usize) {
+fn check_field<F: butterfly_fft::core::kernel::ButterflyKernels>(log_size: usize, row_len: usize) {
     let plan = TransformPlan::<F>::new(1 << log_size).expect("valid plan");
     let mut rows = vec![0x5Au8; plan.size() * row_len];
     let mut derivative = vec![0u8; rows.len()];
@@ -111,7 +111,9 @@ fn execution_allocates_nothing() {
 /// state on a codec hot path.
 #[cfg(feature = "rs")]
 fn check_rs_helpers() {
-    use cafft::rs::{ErasureLocator, LocatorScratch, RecoveryScratch, StripEncoder, recover_rows};
+    use butterfly_fft::rs::{
+        ErasureLocator, LocatorScratch, RecoveryScratch, StripEncoder, recover_rows,
+    };
 
     let (data_points, repair_points, row_len) = (9usize, 7usize, 8usize);
     let encoder = StripEncoder::<Gf16>::new(data_points, repair_points, row_len).expect("geometry");

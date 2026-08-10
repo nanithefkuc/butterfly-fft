@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cafft"
+name = "butterfly-fft"
 version = "0.1.1"
 dependencies = [
  "fgf",

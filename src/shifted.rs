@@ -23,8 +23,8 @@
 //! hold its `ShiftedPlan`.
 //!
 //! ```
-//! use cafft::basis::{BitBasis, OrderedBasis};
-//! use cafft::shifted::ShiftedPlan;
+//! use butterfly_fft::basis::{BitBasis, OrderedBasis};
+//! use butterfly_fft::shifted::ShiftedPlan;
 //! use fgf::{Gf16, field::Elem, gf16};
 //!
 //! // Evaluate over the coset α + span{β_0, β_1}.

@@ -4,28 +4,28 @@ use std::ffi::{CStr, c_char, c_void};
 use std::sync::LazyLock;
 
 unsafe extern "C" {
-    fn cafft_leopard_init() -> bool;
-    fn cafft_leopard_backend() -> *const c_char;
-    fn cafft_leopard_forward(rows: *mut *mut c_void, points: u32, row_len: u64);
-    fn cafft_leopard_inverse(rows: *mut *mut c_void, points: u32, row_len: u64);
-    fn cafft_leopard_derivative(rows: *mut *mut c_void, points: u32, row_len: u64);
+    fn butterfly_fft_leopard_init() -> bool;
+    fn butterfly_fft_leopard_backend() -> *const c_char;
+    fn butterfly_fft_leopard_forward(rows: *mut *mut c_void, points: u32, row_len: u64);
+    fn butterfly_fft_leopard_inverse(rows: *mut *mut c_void, points: u32, row_len: u64);
+    fn butterfly_fft_leopard_derivative(rows: *mut *mut c_void, points: u32, row_len: u64);
 
-    fn cafft_nanors_init();
-    fn cafft_nanors_backend() -> *const c_char;
-    fn cafft_nanors_forward(rows: *mut u8, log_points: u32, row_len: u32);
-    fn cafft_nanors_inverse(rows: *mut u8, log_points: u32, row_len: u32);
+    fn butterfly_fft_nanors_init();
+    fn butterfly_fft_nanors_backend() -> *const c_char;
+    fn butterfly_fft_nanors_forward(rows: *mut u8, log_points: u32, row_len: u32);
+    fn butterfly_fft_nanors_inverse(rows: *mut u8, log_points: u32, row_len: u32);
 }
 
 static LEOPARD_INITIALIZED: LazyLock<()> = LazyLock::new(|| {
     // SAFETY: initialization takes no pointers and is serialized by LazyLock.
     assert!(
-        unsafe { cafft_leopard_init() },
+        unsafe { butterfly_fft_leopard_init() },
         "Leopard FF16 self-test failed"
     );
 });
 static NANORS_INITIALIZED: LazyLock<()> = LazyLock::new(|| {
     // SAFETY: initialization takes no pointers and is serialized by LazyLock.
-    unsafe { cafft_nanors_init() };
+    unsafe { butterfly_fft_nanors_init() };
 });
 
 fn initialize_leopard() {
@@ -52,7 +52,7 @@ fn backend_name(pointer: *const c_char) -> &'static str {
 pub fn leopard_backend() -> &'static str {
     initialize_leopard();
     // SAFETY: initialization completed and the function returns a static string.
-    backend_name(unsafe { cafft_leopard_backend() })
+    backend_name(unsafe { butterfly_fft_leopard_backend() })
 }
 
 /// Flat payload plus the row-pointer table required by catid/leopard.
@@ -97,7 +97,7 @@ impl LeopardBuffer {
         // SAFETY: the pointer table has one valid row pointer per point and all
         // rows have Leopard's required 64-byte-multiple length.
         unsafe {
-            cafft_leopard_forward(
+            butterfly_fft_leopard_forward(
                 self.pointers.as_mut_ptr(),
                 self.pointers.len() as u32,
                 self.row_len as u64,
@@ -110,7 +110,7 @@ impl LeopardBuffer {
         initialize_leopard();
         // SAFETY: the same invariants as `forward` hold.
         unsafe {
-            cafft_leopard_inverse(
+            butterfly_fft_leopard_inverse(
                 self.pointers.as_mut_ptr(),
                 self.pointers.len() as u32,
                 self.row_len as u64,
@@ -123,7 +123,7 @@ impl LeopardBuffer {
         initialize_leopard();
         // SAFETY: the same invariants as `forward` hold.
         unsafe {
-            cafft_leopard_derivative(
+            butterfly_fft_leopard_derivative(
                 self.pointers.as_mut_ptr(),
                 self.pointers.len() as u32,
                 self.row_len as u64,
@@ -143,7 +143,7 @@ impl Clone for LeopardBuffer {
 pub fn nanors_backend() -> &'static str {
     initialize_nanors();
     // SAFETY: initialization completed and the function returns a static string.
-    backend_name(unsafe { cafft_nanors_backend() })
+    backend_name(unsafe { butterfly_fft_nanors_backend() })
 }
 
 /// Flat point-major payload accepted by nanors' raw FF16 walkers.
@@ -182,7 +182,7 @@ impl NanorsBuffer {
         // SAFETY: construction established a writable point-major array of
         // complete u16 lanes.
         unsafe {
-            cafft_nanors_forward(
+            butterfly_fft_nanors_forward(
                 self.bytes.as_mut_ptr(),
                 self.points.trailing_zeros(),
                 self.row_len as u32,
@@ -195,7 +195,7 @@ impl NanorsBuffer {
         initialize_nanors();
         // SAFETY: the same invariants as `forward` hold.
         unsafe {
-            cafft_nanors_inverse(
+            butterfly_fft_nanors_inverse(
                 self.bytes.as_mut_ptr(),
                 self.points.trailing_zeros(),
                 self.row_len as u32,
