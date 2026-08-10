@@ -622,6 +622,7 @@ mod tests {
     use ::alloc::vec::Vec;
     use fgf::field::{Elem, Field};
 
+    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     /// Whether the host resolves to one of the tiers in `supported` — the
     /// shared substitute for the crate's old `supported_on_host` /
     /// `std::is_*_feature_detected!` test gates. Detection is single-source
