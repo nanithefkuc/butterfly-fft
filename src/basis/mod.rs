@@ -42,9 +42,9 @@ pub use cantor::CantorBasis;
 #[cfg(feature = "std")]
 pub use cantor::cantor_basis;
 pub use convert::{
-    conversion_scratch_elements, monomial_to_novel, monomial_to_novel_bytes,
-    monomial_to_novel_with_scratch, novel_to_monomial, novel_to_monomial_bytes,
-    novel_to_monomial_with_scratch,
+    conversion_scratch_elements, inverse_interpolate_bytes, monomial_to_novel,
+    monomial_to_novel_bytes, monomial_to_novel_with_scratch, novel_to_monomial,
+    novel_to_monomial_bytes, novel_to_monomial_with_scratch,
 };
 
 #[cfg(feature = "rs")]
