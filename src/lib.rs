@@ -16,13 +16,11 @@
 //! - [`basis`] — ordered field bases (bit, Cantor) and monomial ↔ novel
 //!   coefficient-basis conversion.
 //! - [`shifted`] — transforms over affine cosets `α + V`.
-//! - [`rs`] — RS-facing erasure algebra (feature `rs`).
 //!
 //! ## Features
 //!
 //! - `std` (default) — runtime CPU detection and shared plan caches.
 //! - `simd` (default, implies `std`) — vector butterfly backends.
-//! - `rs` — RS erasure helpers.
 //! - `internals` — unstable APIs, exempt from compatibility guarantees.
 //!
 //! ## Naming note
@@ -54,6 +52,4 @@ pub mod core;
 pub mod error;
 #[cfg(feature = "internals")]
 pub mod internals;
-#[cfg(feature = "rs")]
-pub mod rs;
 pub mod shifted;

@@ -47,8 +47,6 @@ pub use convert::{
     novel_to_monomial_bytes, novel_to_monomial_with_scratch,
 };
 
-#[cfg(feature = "rs")]
-pub(crate) use gf2::bits_of;
 pub(crate) use gf2::independent;
 
 /// An ordered GF(2)-basis of a field.

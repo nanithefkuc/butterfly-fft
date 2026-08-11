@@ -7,7 +7,7 @@ description = "Common Additive Fast Fourier Transform: shared additive-FFT engin
 repository = "https://github.com/nanithefkuc/butterfly-fft"
 license = "MIT"
 readme = "README.md"
-keywords = ["galois", "finite-field", "fft", "erasure", "reed-solomon"]
+keywords = ["galois", "finite-field", "fft", "additive-fft", "simd"]
 categories = ["algorithms", "mathematics", "no-std"]
 exclude = ["/.github", "/.plans", "/benchmarks"]
 
@@ -19,9 +19,6 @@ std = ["fgf/std"]
 # Runtime-dispatched SIMD butterfly kernels (v3_gfni_crypto / v3 / v2 on x86,
 # neon on AArch64). Disabling leaves the portable scalar backend.
 simd = ["std", "fgf/simd"]
-# RS-facing erasure algebra: locator evaluation, Forney-style recovery,
-# systematic-locator caches, strip-blocked encode skeletons.
-rs = ["std"]
 # Expose unstable implementation APIs for experimentation and downstream
 # tuning. Exempt from this crate's compatibility guarantees.
 internals = []
