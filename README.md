@@ -41,7 +41,6 @@ butterfly-fft = { git = "https://github.com/nanithefkuc/butterfly-fft", default-
 | default (`std`, `simd`) | shared plan caches and runtime-dispatched butterfly kernels |
 | `std` without `simd` | allocation-backed plans with portable scalar execution |
 | `simd` | runtime-selected vector butterflies; implies `std` |
-| `rs` | RS-facing erasure algebra and strip-blocked encoding helpers |
 | `internals` | unstable factor tables and implementation APIs for experiments |
 | `--no-default-features` | `no_std` plus `alloc`, portable scalar execution |
 
@@ -107,7 +106,6 @@ values.
 | `core::kernel` | fused butterfly kernels and runtime SIMD dispatch |
 | `basis` | [`BitBasis`], [`CantorBasis`], [`CoordinateMap`], and monomial/novel conversion |
 | `shifted` | [`ShiftedPlan`] execution over affine cosets `α + V` |
-| `rs` | RS erasure algebra, enabled by the `rs` feature |
 
 ## Building
 
