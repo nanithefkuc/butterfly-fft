@@ -608,7 +608,10 @@ mod tests {
             );
         }
         for log_size in 0..=8usize {
-            round_trip(&TransformPlan::<Gf8B>::new(1 << log_size).unwrap(), &mut rng);
+            round_trip(
+                &TransformPlan::<Gf8B>::new(1 << log_size).unwrap(),
+                &mut rng,
+            );
         }
     }
 
@@ -641,7 +644,10 @@ mod tests {
             );
         }
         for log_size in 0..=8usize {
-            agrees_with_horner(&TransformPlan::<Gf8B>::new(1 << log_size).unwrap(), &mut rng);
+            agrees_with_horner(
+                &TransformPlan::<Gf8B>::new(1 << log_size).unwrap(),
+                &mut rng,
+            );
         }
     }
 
