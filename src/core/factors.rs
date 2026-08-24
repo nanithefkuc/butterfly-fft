@@ -267,7 +267,7 @@ pub(crate) fn linearly_independent<F: Field>(elements: &[F::Elem]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fgf::{Gf8, Gf16};
+    use fgf::{Gf8B, Gf16};
 
     /// Ground truth: `W̄_k` vanishes on every point of `V_k`.
     fn vanishes_on_subspace<F: Field>() {
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn subspace_polynomials_vanish() {
-        vanishes_on_subspace::<Gf8>();
+        vanishes_on_subspace::<Gf8B>();
         vanishes_on_subspace::<Gf16>();
     }
 
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn normalizers_match_definition() {
-        normalizer_inverts::<Gf8>();
+        normalizer_inverts::<Gf8B>();
         normalizer_inverts::<Gf16>();
     }
 
@@ -320,7 +320,7 @@ mod tests {
                 assert_eq!(element, element_from_index::<F>(1 << index));
             }
         }
-        check::<Gf8>();
+        check::<Gf8B>();
         check::<Gf16>();
     }
 
@@ -334,7 +334,7 @@ mod tests {
             dependent.push(dependent[0].add(dependent[1]));
             assert!(!linearly_independent::<F>(&dependent));
         }
-        check::<Gf8>();
+        check::<Gf8B>();
         check::<Gf16>();
     }
 
@@ -345,7 +345,7 @@ mod tests {
             let dependent = [basis[0], basis[0]];
             assert!(subspace_polynomials(&dependent).is_none());
         }
-        check::<Gf8>();
+        check::<Gf8B>();
         check::<Gf16>();
     }
 
@@ -375,7 +375,7 @@ mod tests {
                 }
             }
         }
-        check::<Gf8>(&mut 0xdead_beef);
+        check::<Gf8B>(&mut 0xdead_beef);
         check::<Gf16>(&mut 0x0bad_f00d);
     }
 
@@ -409,7 +409,7 @@ mod tests {
                 "high child"
             );
         }
-        check::<Gf8>();
+        check::<Gf8B>();
         check::<Gf16>();
     }
 }

@@ -1108,7 +1108,7 @@ mod tests {
         NormalizedSubspacePolynomial, bit_basis, element_from_index, subspace_polynomials,
     };
     use ::alloc::vec;
-    use fgf::{Gf8, Gf16};
+    use fgf::{Gf8B, Gf16};
 
     fn lcg(state: &mut u32) -> u32 {
         *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -1181,7 +1181,7 @@ mod tests {
                 })
             );
         }
-        check::<Gf8>(8);
+        check::<Gf8B>(8);
         check::<Gf16>(16);
     }
 
@@ -1210,7 +1210,7 @@ mod tests {
                 assert_eq!(actual, expected, "forward diverged at size {size}");
             }
         }
-        check::<Gf8>(&mut 0x1234_5678);
+        check::<Gf8B>(&mut 0x1234_5678);
         check::<Gf16>(&mut 0x9abc_def0);
     }
 
@@ -1227,7 +1227,7 @@ mod tests {
                 assert_eq!(values, expected, "roundtrip failed at size {size}");
             }
         }
-        check::<Gf8>(&mut 11, 8);
+        check::<Gf8B>(&mut 11, 8);
         check::<Gf16>(&mut 13, 10);
     }
 
@@ -1271,7 +1271,7 @@ mod tests {
                 assert_eq!(rows, original, "byte roundtrip failed at size {size}");
             }
         }
-        check::<Gf8>(&mut 17);
+        check::<Gf8B>(&mut 17);
         check::<Gf16>(&mut 19);
     }
 
@@ -1297,7 +1297,7 @@ mod tests {
                 assert_eq!(derivative, expected, "derivative diverged at size {size}");
             }
         }
-        check::<Gf8>(&mut 23);
+        check::<Gf8B>(&mut 23);
         check::<Gf16>(&mut 29);
     }
 
@@ -1312,7 +1312,7 @@ mod tests {
             plan.derivative(&coefficients, &mut derivative).unwrap();
             assert!(derivative.iter().all(|element| element.is_zero()));
         }
-        check::<Gf8>();
+        check::<Gf8B>();
         check::<Gf16>();
     }
 
@@ -1345,7 +1345,7 @@ mod tests {
                 );
             }
         }
-        check::<Gf8>(&mut 31);
+        check::<Gf8B>(&mut 31);
         check::<Gf16>(&mut 37);
     }
 
@@ -1377,7 +1377,7 @@ mod tests {
                 PlanError::BasisTooShort { needed: 4, got: 2 }
             );
         }
-        check::<Gf8>(&mut 41);
+        check::<Gf8B>(&mut 41);
         check::<Gf16>(&mut 43);
     }
 
@@ -1389,7 +1389,7 @@ mod tests {
                 assert_eq!(plan.point_element(index), element_from_index::<F>(index));
             }
         }
-        check::<Gf8>();
+        check::<Gf8B>();
         check::<Gf16>();
     }
 
@@ -1408,7 +1408,7 @@ mod tests {
             let b = cache.shared(64).unwrap();
             assert!(Arc::ptr_eq(&a, &b));
         }
-        check::<Gf8>();
+        check::<Gf8B>();
         check::<Gf16>();
     }
 
@@ -1461,7 +1461,7 @@ mod tests {
                 }
             }
         }
-        check::<Gf8>(&mut 47);
+        check::<Gf8B>(&mut 47);
         check::<Gf16>(&mut 53);
     }
 
@@ -1495,7 +1495,7 @@ mod tests {
                 }
             }
         }
-        check::<Gf8>(&mut 59);
+        check::<Gf8B>(&mut 59);
         check::<Gf16>(&mut 61);
     }
 
@@ -1527,7 +1527,7 @@ mod tests {
                 }
             }
         }
-        check::<Gf8>(&mut 67);
+        check::<Gf8B>(&mut 67);
         check::<Gf16>(&mut 71);
     }
 
@@ -1563,7 +1563,7 @@ mod tests {
                     .is_err()
             );
         }
-        check::<Gf8>(&mut 73);
+        check::<Gf8B>(&mut 73);
         check::<Gf16>(&mut 79);
     }
 
@@ -1608,7 +1608,7 @@ mod tests {
                 }
             }
         }
-        check::<Gf8>(&mut 83);
+        check::<Gf8B>(&mut 83);
         check::<Gf16>(&mut 89);
     }
 
@@ -1630,14 +1630,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "row length must be nonzero")]
     fn byte_rows_reject_zero_width_before_walking() {
-        let plan = TransformPlan::<Gf8>::new(4).unwrap();
+        let plan = TransformPlan::<Gf8B>::new(4).unwrap();
         let _ = plan.forward_bytes_selected(&mut [], 0, &[0]);
     }
 
     #[test]
     #[should_panic(expected = "transform byte length overflow")]
     fn byte_rows_reject_unrepresentable_geometry() {
-        let plan = TransformPlan::<Gf8>::new(4).unwrap();
+        let plan = TransformPlan::<Gf8B>::new(4).unwrap();
         let row_len = 1usize << (usize::BITS - 2);
         let _ = plan.forward_bytes(&mut [], row_len);
     }
@@ -1696,7 +1696,7 @@ mod tests {
                 );
             }
         }
-        check::<Gf8>(&mut 11);
+        check::<Gf8B>(&mut 11);
         check::<Gf16>(&mut 13);
     }
 
@@ -1731,7 +1731,7 @@ mod tests {
                 );
             }
         }
-        check::<Gf8>(&mut 17);
+        check::<Gf8B>(&mut 17);
         check::<Gf16>(&mut 19);
     }
 }

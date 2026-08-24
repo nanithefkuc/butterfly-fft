@@ -19,7 +19,7 @@
 use butterfly_fft::core::kernel::ButterflyKernels;
 use butterfly_fft::core::transform::TransformPlan;
 use fgf::field::{Elem, Field};
-use fgf::{Gf8, Gf16};
+use fgf::{Gf8B, Gf16};
 
 /// Deterministic per-test element stream.
 struct Rng(u64);
@@ -141,7 +141,7 @@ fn selected_matches_full<F: ButterflyKernels>(seed: u64) {
 
 #[test]
 fn selected_matches_full_transform_on_wide_rows() {
-    selected_matches_full::<Gf8>(0x1234_5678_9abc_def0);
+    selected_matches_full::<Gf8B>(0x1234_5678_9abc_def0);
     selected_matches_full::<Gf16>(0x0fed_cba9_8765_4321);
 }
 
@@ -167,7 +167,7 @@ fn range_matches_full<F: ButterflyKernels>(seed: u64) {
 
 #[test]
 fn every_contiguous_range_matches_full_transform() {
-    range_matches_full::<Gf8>(0xdead_beef_cafe_0001);
+    range_matches_full::<Gf8B>(0xdead_beef_cafe_0001);
     range_matches_full::<Gf16>(0xdead_beef_cafe_0002);
 }
 
@@ -205,7 +205,7 @@ fn trunc_range_matches_padded<F: ButterflyKernels>(seed: u64) {
 
 #[test]
 fn truncated_forward_matches_zero_padded_full_transform() {
-    trunc_range_matches_padded::<Gf8>(0xfeed_face_0000_0001);
+    trunc_range_matches_padded::<Gf8B>(0xfeed_face_0000_0001);
     trunc_range_matches_padded::<Gf16>(0xfeed_face_0000_0002);
 }
 
@@ -264,7 +264,7 @@ fn high_coset_matches_full<F: ButterflyKernels>(seed: u64) {
 
 #[test]
 fn high_coset_sub_ranges_match_full_transform() {
-    high_coset_matches_full::<Gf8>(0xabcd_ef01_2345_6789);
+    high_coset_matches_full::<Gf8B>(0xabcd_ef01_2345_6789);
     high_coset_matches_full::<Gf16>(0x9876_5432_10fe_dcba);
 }
 
@@ -296,7 +296,7 @@ fn inverse_truncated_recovers<F: ButterflyKernels>(seed: u64) {
 
 #[test]
 fn truncated_inverse_recovers_every_active_prefix() {
-    inverse_truncated_recovers::<Gf8>(0x0102_0304_0506_0708);
+    inverse_truncated_recovers::<Gf8B>(0x0102_0304_0506_0708);
     inverse_truncated_recovers::<Gf16>(0x0807_0605_0403_0201);
 }
 

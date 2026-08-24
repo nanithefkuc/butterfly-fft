@@ -192,7 +192,7 @@ pub fn point_of<F: Field>(basis: &[F::Elem], index: usize) -> F::Elem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fgf::{FanPaar16, Gf8, Gf16, Gf32, Gf64};
+    use fgf::{FanPaar16, Gf8B, Gf16, Gf32, Gf64};
 
     fn bit_basis_is_identity_map<F: Field>() {
         let map = CoordinateMap::<F>::of(&BitBasis).expect("bit basis is a full basis");
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn bit_basis_coordinates_are_bit_patterns() {
-        bit_basis_is_identity_map::<Gf8>();
+        bit_basis_is_identity_map::<Gf8B>();
         bit_basis_is_identity_map::<Gf16>();
         bit_basis_is_identity_map::<Gf32>();
         bit_basis_is_identity_map::<Gf64>();
@@ -215,15 +215,15 @@ mod tests {
     #[test]
     fn short_or_dependent_bases_have_no_coordinate_map() {
         let short: Vec<_> = (0..4)
-            .map(|i| OrderedBasis::<Gf8>::element(&BitBasis, i))
+            .map(|i| OrderedBasis::<Gf8B>::element(&BitBasis, i))
             .collect();
-        assert!(CoordinateMap::<Gf8>::new(&short).is_none());
+        assert!(CoordinateMap::<Gf8B>::new(&short).is_none());
 
         let mut dependent: Vec<_> = (0..8)
-            .map(|i| OrderedBasis::<Gf8>::element(&BitBasis, i))
+            .map(|i| OrderedBasis::<Gf8B>::element(&BitBasis, i))
             .collect();
         dependent[7] = dependent[0].add(dependent[1]);
-        assert!(CoordinateMap::<Gf8>::new(&dependent).is_none());
+        assert!(CoordinateMap::<Gf8B>::new(&dependent).is_none());
     }
 
     #[test]
@@ -240,7 +240,7 @@ mod tests {
                 );
             }
         }
-        check::<Gf8>();
+        check::<Gf8B>();
         check::<Gf16>();
         check::<Gf32>();
     }

@@ -24,7 +24,7 @@ use ::core::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use ::core::arch::x86_64::*;
 
-use fgf::{Gf8, Gf16, gf8, gf16};
+use fgf::{Gf8B, Gf16, gf8b, gf16};
 
 use super::scalar;
 
@@ -40,12 +40,12 @@ struct ScaleTable {
     high: [u8; 32],
 }
 
-fn scale_table(coefficient: gf8::Elem) -> ScaleTable {
+fn scale_table(coefficient: gf8b::Elem) -> ScaleTable {
     let mut low = [0; 32];
     let mut high = [0; 32];
     for nibble in 0..16u8 {
-        low[nibble as usize] = gf8::Elem(nibble).mul(coefficient).0;
-        high[nibble as usize] = gf8::Elem(nibble << 4).mul(coefficient).0;
+        low[nibble as usize] = gf8b::Elem(nibble).mul(coefficient).0;
+        high[nibble as usize] = gf8b::Elem(nibble << 4).mul(coefficient).0;
     }
     for nibble in 0..16 {
         low[16 + nibble] = low[nibble];
@@ -184,7 +184,7 @@ unsafe fn scaled_vector_ssse3(source: __m128i, tables: &[ScaleTable; 4]) -> __m1
 pub(super) unsafe fn gf8_fused_forward_gfni(
     low: &mut [u8],
     high: &mut [u8],
-    coefficient: gf8::Elem,
+    coefficient: gf8b::Elem,
 ) {
     let coeff = _mm256_set1_epi8(coefficient.0.cast_signed());
     let vector_len = low.len() / 32 * 32;
@@ -207,14 +207,14 @@ pub(super) unsafe fn gf8_fused_forward_gfni(
         }
         offset += 32;
     }
-    scalar::fused_forward::<Gf8>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_forward::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
 }
 
 #[target_feature(enable = "avx2,gfni")]
 pub(super) unsafe fn gf8_fused_inverse_gfni(
     low: &mut [u8],
     high: &mut [u8],
-    coefficient: gf8::Elem,
+    coefficient: gf8b::Elem,
 ) {
     let coeff = _mm256_set1_epi8(coefficient.0.cast_signed());
     let vector_len = low.len() / 32 * 32;
@@ -237,14 +237,14 @@ pub(super) unsafe fn gf8_fused_inverse_gfni(
         }
         offset += 32;
     }
-    scalar::fused_inverse::<Gf8>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_inverse::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
 }
 
 #[target_feature(enable = "avx2")]
 pub(super) unsafe fn gf8_fused_forward_avx2(
     low: &mut [u8],
     high: &mut [u8],
-    coefficient: gf8::Elem,
+    coefficient: gf8b::Elem,
 ) {
     let table = scale_table(coefficient);
     let vector_len = low.len() / 32 * 32;
@@ -268,14 +268,14 @@ pub(super) unsafe fn gf8_fused_forward_avx2(
         }
         offset += 32;
     }
-    scalar::fused_forward::<Gf8>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_forward::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
 }
 
 #[target_feature(enable = "avx2")]
 pub(super) unsafe fn gf8_fused_inverse_avx2(
     low: &mut [u8],
     high: &mut [u8],
-    coefficient: gf8::Elem,
+    coefficient: gf8b::Elem,
 ) {
     let table = scale_table(coefficient);
     let vector_len = low.len() / 32 * 32;
@@ -299,14 +299,14 @@ pub(super) unsafe fn gf8_fused_inverse_avx2(
         }
         offset += 32;
     }
-    scalar::fused_inverse::<Gf8>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_inverse::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
 }
 
 #[target_feature(enable = "ssse3")]
 pub(super) unsafe fn gf8_fused_forward_ssse3(
     low: &mut [u8],
     high: &mut [u8],
-    coefficient: gf8::Elem,
+    coefficient: gf8b::Elem,
 ) {
     let table = scale_table(coefficient);
     let vector_len = low.len() / 16 * 16;
@@ -330,14 +330,14 @@ pub(super) unsafe fn gf8_fused_forward_ssse3(
         }
         offset += 16;
     }
-    scalar::fused_forward::<Gf8>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_forward::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
 }
 
 #[target_feature(enable = "ssse3")]
 pub(super) unsafe fn gf8_fused_inverse_ssse3(
     low: &mut [u8],
     high: &mut [u8],
-    coefficient: gf8::Elem,
+    coefficient: gf8b::Elem,
 ) {
     let table = scale_table(coefficient);
     let vector_len = low.len() / 16 * 16;
@@ -361,7 +361,7 @@ pub(super) unsafe fn gf8_fused_inverse_ssse3(
         }
         offset += 16;
     }
-    scalar::fused_inverse::<Gf8>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_inverse::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
 }
 
 // ---------------------------------------------------------------------------

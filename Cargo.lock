@@ -32,8 +32,8 @@ dependencies = [
 
 [[package]]
 name = "fgf"
-version = "0.3.0"
-source = "git+https://github.com/nanithefkuc/fgf?rev=d0e331cec2e6ae5645e529597fa913db467a44cd#d0e331cec2e6ae5645e529597fa913db467a44cd"
+version = "0.7.0"
+source = "git+https://github.com/nanithefkuc/fgf?rev=58a3faf7a5f0be401245d78a49abc60dc76c94cd#58a3faf7a5f0be401245d78a49abc60dc76c94cd"
 dependencies = [
  "simdispatch",
 ]

@@ -43,7 +43,7 @@ use ::core::marker::PhantomData;
 
 use fgf::field::Elem;
 use fgf::kernel::FieldKernels;
-use fgf::{FanPaar8, FanPaar16, FanPaar32, FanPaar64, Gf8, Gf16, Gf32, Gf64};
+use fgf::{FanPaar8, FanPaar16, FanPaar32, FanPaar64, Gf8B, Gf16, Gf32, Gf64};
 
 // The backend ladder and the downgrade-only override are owned by
 // `simdispatch` (Level 0); fgf re-exports the same ladder, so `Backend`
@@ -125,7 +125,7 @@ mod private {
     pub trait Sealed {}
 }
 
-impl private::Sealed for Gf8 {}
+impl private::Sealed for Gf8B {}
 impl private::Sealed for Gf16 {}
 impl private::Sealed for Gf32 {}
 impl private::Sealed for Gf64 {}
@@ -233,7 +233,7 @@ pub trait ButterflyKernels: FieldKernels + private::Sealed {
     }
 }
 
-impl ButterflyKernels for Gf8 {
+impl ButterflyKernels for Gf8B {
     const BUTTERFLY_TIERS: &'static [Backend] = BUTTERFLY_FFT_TIERS;
 
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
@@ -637,11 +637,11 @@ mod tests {
 
     #[test]
     fn resolved_backend_is_in_supported_tiers() {
-        // The resolution contract: `backend()` and `backend_for::<Gf8/Gf16>`
+        // The resolution contract: `backend()` and `backend_for::<Gf8B/Gf16>`
         // always land on a tier the crate implements (or Scalar), never a
         // backend it has no kernels for — the old `cap`-merging rot.
         assert!(BUTTERFLY_FFT_TIERS.contains(&backend()));
-        assert!(Gf8::BUTTERFLY_TIERS.contains(&backend_for::<Gf8>()));
+        assert!(Gf8B::BUTTERFLY_TIERS.contains(&backend_for::<Gf8B>()));
         assert!(Gf16::BUTTERFLY_TIERS.contains(&backend_for::<Gf16>()));
         // Wider fields have no butterfly kernels: always Scalar.
         assert_eq!(backend_for::<Gf32>(), Backend::Scalar);
@@ -692,8 +692,8 @@ mod tests {
 
     #[test]
     fn scalar_roundtrip_gf8() {
-        let coefficients = [0x00, 0x01, 0x02, 0x03, 0x53, 0xff].map(fgf::gf8::Elem);
-        scalar_roundtrip::<Gf8>(&coefficients);
+        let coefficients = [0x00, 0x01, 0x02, 0x03, 0x53, 0xff].map(fgf::gf8b::Elem);
+        scalar_roundtrip::<Gf8B>(&coefficients);
     }
 
     #[test]
@@ -704,21 +704,21 @@ mod tests {
 
     #[test]
     fn scalar_forward_matches_element_math_gf8() {
-        for coefficient in [0x00, 0x01, 0x03, 0xff].map(fgf::gf8::Elem) {
+        for coefficient in [0x00, 0x01, 0x03, 0xff].map(fgf::gf8b::Elem) {
             for len in lengths(1) {
                 let low = pattern(0x3d, len);
                 let high = pattern(0xc2, len);
                 let mut expected_low = low.clone();
                 let mut expected_high = high.clone();
                 for (l, h) in expected_low.iter_mut().zip(&mut expected_high) {
-                    let lo = fgf::gf8::Elem(*l);
-                    let hi = fgf::gf8::Elem(*h);
+                    let lo = fgf::gf8b::Elem(*l);
+                    let hi = fgf::gf8b::Elem(*h);
                     let new_low = lo.add(coefficient.mul(hi));
                     *l = new_low.0;
                     *h = hi.add(new_low).0;
                 }
                 let (mut low, mut high) = (low, high);
-                scalar::fused_forward::<Gf8>(&mut low, &mut high, coefficient);
+                scalar::fused_forward::<Gf8B>(&mut low, &mut high, coefficient);
                 assert_eq!(low, expected_low);
                 assert_eq!(high, expected_high);
             }
@@ -767,7 +767,7 @@ mod tests {
                 }
             }
         }
-        check::<Gf8>(&[0x00, 0x01, 0x53, 0xff].map(fgf::gf8::Elem));
+        check::<Gf8B>(&[0x00, 0x01, 0x53, 0xff].map(fgf::gf8b::Elem));
         check::<Gf16>(&[0x0000, 0x0001, 0x0108, 0x9b37].map(fgf::gf16::Elem));
     }
 
@@ -785,7 +785,7 @@ mod tests {
                 assert_eq!(high, expected_high);
             }
         }
-        check::<Gf8>();
+        check::<Gf8B>();
         check::<Gf16>();
     }
 
@@ -808,9 +808,9 @@ mod tests {
                 assert_eq!(dst, expected);
             }
         }
-        check::<Gf8>(fgf::gf8::Elem(0x53));
-        check::<Gf8>(fgf::gf8::Elem(0x00));
-        check::<Gf8>(fgf::gf8::Elem(0x01));
+        check::<Gf8B>(fgf::gf8b::Elem(0x53));
+        check::<Gf8B>(fgf::gf8b::Elem(0x00));
+        check::<Gf8B>(fgf::gf8b::Elem(0x01));
         check::<Gf16>(fgf::gf16::Elem(0x9b37));
         check::<Gf16>(fgf::gf16::Elem(0x0000));
         check::<Gf16>(fgf::gf16::Elem(0x0001));
@@ -836,7 +836,7 @@ mod tests {
             assert_eq!(destinations, expected);
         }
 
-        check::<Gf8>(&[0x00, 0x01, 0x53, 0xff].map(fgf::gf8::Elem));
+        check::<Gf8B>(&[0x00, 0x01, 0x53, 0xff].map(fgf::gf8b::Elem));
         check::<Gf16>(&[0x0000, 0x0001, 0x9b37, 0xffff].map(fgf::gf16::Elem));
     }
 
@@ -905,16 +905,16 @@ mod tests {
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     #[test]
     fn x86_backends_match_scalar_in_both_directions() {
-        differential_x86::<Gf8>(&[0x00, 0x01, 0x02, 0x53, 0xff].map(fgf::gf8::Elem));
+        differential_x86::<Gf8B>(&[0x00, 0x01, 0x02, 0x53, 0xff].map(fgf::gf8b::Elem));
         differential_x86::<Gf16>(&[0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fgf::gf16::Elem));
     }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
     #[test]
     fn neon_backends_match_scalar_in_both_directions() {
-        differential_backend::<Gf8, NeonBackend<Gf8>>(
+        differential_backend::<Gf8B, NeonBackend<Gf8B>>(
             "neon",
-            &[0x00, 0x01, 0x02, 0x53, 0xff].map(fgf::gf8::Elem),
+            &[0x00, 0x01, 0x02, 0x53, 0xff].map(fgf::gf8b::Elem),
         );
         differential_backend::<Gf16, NeonBackend<Gf16>>(
             "neon",

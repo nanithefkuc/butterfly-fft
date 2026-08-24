@@ -14,7 +14,7 @@ use butterfly_fft::basis::{
     novel_to_monomial_bytes, novel_to_monomial_with_scratch,
 };
 use butterfly_fft::core::transform::TransformPlan;
-use fgf::{Gf8, Gf16};
+use fgf::{Gf8B, Gf16};
 
 struct Counting;
 
@@ -100,6 +100,6 @@ fn check_field<F: butterfly_fft::core::kernel::ButterflyKernels>(log_size: usize
 fn execution_allocates_nothing() {
     check_field::<Gf16>(10, 64);
     check_field::<Gf16>(1, 2);
-    check_field::<Gf8>(8, 33);
-    check_field::<Gf8>(0, 1);
+    check_field::<Gf8B>(8, 33);
+    check_field::<Gf8B>(0, 1);
 }

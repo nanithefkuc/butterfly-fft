@@ -17,7 +17,7 @@ use butterfly_fft::basis::{
 use butterfly_fft::core::transform::TransformPlan;
 use butterfly_fft::shifted::ShiftedPlan;
 use fgf::field::{Elem, Field};
-use fgf::{Gf8, Gf16};
+use fgf::{Gf8B, Gf16};
 
 struct Rng(u64);
 
@@ -115,7 +115,7 @@ fn evaluate_over_affine_subspace<F: butterfly_fft::core::kernel::ButterflyKernel
 
 #[test]
 fn monomial_polynomial_over_an_arbitrary_affine_subspace() {
-    evaluate_over_affine_subspace::<Gf8>(0x1111_2222_3333_4444);
+    evaluate_over_affine_subspace::<Gf8B>(0x1111_2222_3333_4444);
     evaluate_over_affine_subspace::<Gf16>(0x4444_3333_2222_1111);
 }
 
@@ -208,10 +208,10 @@ fn cantor_domain_basis_behaves_like_any_other() {
 /// every element of a small field and a sample of a larger one.
 #[test]
 fn change_of_basis_matrices_invert() {
-    let cantor8 = CantorBasis::<Gf8>::build().unwrap();
-    let map = CoordinateMap::<Gf8>::of(&cantor8).unwrap();
+    let cantor8 = CantorBasis::<Gf8B>::build().unwrap();
+    let map = CoordinateMap::<Gf8B>::of(&cantor8).unwrap();
     for pattern in 0..256u64 {
-        let element = <Gf8 as Field>::read(&pattern.to_le_bytes()[..1]);
+        let element = <Gf8B as Field>::read(&pattern.to_le_bytes()[..1]);
         assert_eq!(map.to_element(map.to_coordinates(element)), element);
         let coordinates = pattern;
         assert_eq!(map.to_coordinates(map.to_element(coordinates)), coordinates);
