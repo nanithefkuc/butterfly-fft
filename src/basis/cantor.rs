@@ -122,7 +122,7 @@ where
 mod tests {
     use super::*;
     use crate::core::factors;
-    use fgf::{FanPaar8, FanPaar16, Gf8, Gf16, Gf32, Gf64};
+    use fgf::{FanPaar8, FanPaar16, Gf8B, Gf16, Gf32, Gf64};
 
     /// Contract: `v_0 = 1` and `v_i² + v_i = v_{i-1}` for every step.
     fn chain_holds<F: Field>() {
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn cantor_chain_holds_for_every_field() {
-        chain_holds::<Gf8>();
+        chain_holds::<Gf8B>();
         chain_holds::<Gf16>();
         chain_holds::<Gf32>();
         chain_holds::<Gf64>();
@@ -157,7 +157,7 @@ mod tests {
             let basis = CantorBasis::<F>::build().unwrap();
             assert!(independent::<F>(basis.elements()), "{}", F::NAME);
         }
-        check::<Gf8>();
+        check::<Gf8B>();
         check::<Gf16>();
         check::<Gf32>();
         check::<Gf64>();
@@ -190,7 +190,7 @@ mod tests {
                 }
             }
         }
-        check::<Gf8>();
+        check::<Gf8B>();
         check::<Gf16>();
         check::<Gf32>();
         check::<Gf64>();
@@ -202,7 +202,7 @@ mod tests {
         let first = cantor_basis::<Gf16>().unwrap();
         let second = cantor_basis::<Gf16>().unwrap();
         assert!(::alloc::sync::Arc::ptr_eq(&first, &second));
-        let other = cantor_basis::<Gf8>().unwrap();
+        let other = cantor_basis::<Gf8B>().unwrap();
         assert_eq!(other.elements().len(), 8);
     }
 }

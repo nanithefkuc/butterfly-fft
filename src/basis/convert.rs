@@ -449,7 +449,7 @@ mod tests {
     use crate::basis::{BitBasis, CantorBasis, OrderedBasis};
     use ::alloc::vec::Vec;
     use fgf::field::Field;
-    use fgf::{Gf8, Gf16};
+    use fgf::{Gf8B, Gf16};
 
     struct Rng(u64);
 
@@ -580,7 +580,7 @@ mod tests {
         let mut rng = Rng(0x6a09_e667_f3bc_c909);
         for &(log_size, lanes) in &[(0usize, 1usize), (1, 3), (3, 17), (5, 33)] {
             scratch_and_byte_variants(
-                &TransformPlan::<Gf8>::new(1 << log_size).unwrap(),
+                &TransformPlan::<Gf8B>::new(1 << log_size).unwrap(),
                 lanes,
                 &mut rng,
             );
@@ -608,7 +608,10 @@ mod tests {
             );
         }
         for log_size in 0..=8usize {
-            round_trip(&TransformPlan::<Gf8>::new(1 << log_size).unwrap(), &mut rng);
+            round_trip(
+                &TransformPlan::<Gf8B>::new(1 << log_size).unwrap(),
+                &mut rng,
+            );
         }
     }
 
@@ -641,7 +644,10 @@ mod tests {
             );
         }
         for log_size in 0..=8usize {
-            agrees_with_horner(&TransformPlan::<Gf8>::new(1 << log_size).unwrap(), &mut rng);
+            agrees_with_horner(
+                &TransformPlan::<Gf8B>::new(1 << log_size).unwrap(),
+                &mut rng,
+            );
         }
     }
 
@@ -800,7 +806,7 @@ mod tests {
             }
         }
         let mut rng = Rng(0x9e37_79b9);
-        check::<Gf8>(&mut rng);
+        check::<Gf8B>(&mut rng);
         check::<Gf16>(&mut rng);
     }
 
@@ -837,7 +843,7 @@ mod tests {
             }
         }
         let mut rng = Rng(0x6c62_2c73);
-        check::<Gf8>(&mut rng);
+        check::<Gf8B>(&mut rng);
         check::<Gf16>(&mut rng);
     }
 }

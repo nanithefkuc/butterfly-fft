@@ -334,7 +334,7 @@ mod tests {
     use crate::basis::{CantorBasis, novel_to_monomial};
     use ::alloc::vec;
     use fgf::field::Field;
-    use fgf::{Gf8, Gf16};
+    use fgf::{Gf8B, Gf16};
 
     struct Rng(u64);
 
@@ -391,7 +391,7 @@ mod tests {
                 }
             }
         }
-        check::<Gf8>(&mut Rng(0x1122_3344_5566_7788));
+        check::<Gf8B>(&mut Rng(0x1122_3344_5566_7788));
         check::<Gf16>(&mut Rng(0x8877_6655_4433_2211));
     }
 
@@ -417,7 +417,7 @@ mod tests {
                 assert_eq!(rows, bytes, "{} byte rows size {size}", F::NAME);
             }
         }
-        check::<Gf8>(&mut Rng(0xaaaa_5555_aaaa_5555));
+        check::<Gf8B>(&mut Rng(0xaaaa_5555_aaaa_5555));
         check::<Gf16>(&mut Rng(0x5555_aaaa_5555_aaaa));
     }
 
@@ -477,7 +477,7 @@ mod tests {
                 }
             }
         }
-        check::<Gf8>(&mut Rng(0x0f0f_0f0f_f0f0_f0f0));
+        check::<Gf8B>(&mut Rng(0x0f0f_0f0f_f0f0_f0f0));
         check::<Gf16>(&mut Rng(0xf0f0_f0f0_0f0f_0f0f));
     }
 
@@ -572,14 +572,14 @@ mod tests {
 
     #[test]
     fn shifted_constructors_share_size_validation() {
-        let shift = <Gf8 as Field>::Elem::ZERO;
+        let shift = <Gf8B as Field>::Elem::ZERO;
         let expected = PlanError::DomainTooLarge {
             log_size: 9,
             cap: 8,
         };
-        assert_eq!(ShiftedPlan::<Gf8>::new(512, shift).unwrap_err(), expected);
+        assert_eq!(ShiftedPlan::<Gf8B>::new(512, shift).unwrap_err(), expected);
         assert_eq!(
-            ShiftedPlan::<Gf8>::with_basis(512, &BitBasis, shift).unwrap_err(),
+            ShiftedPlan::<Gf8B>::with_basis(512, &BitBasis, shift).unwrap_err(),
             expected
         );
     }

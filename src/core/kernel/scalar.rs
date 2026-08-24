@@ -14,10 +14,11 @@ use fgf::field::{Elem, Field};
 pub(crate) fn fused_forward<F: Field>(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
     debug_assert_eq!(low.len(), high.len());
     debug_assert_eq!(low.len() % F::BYTES, 0);
-    for (l, h) in low
-        .chunks_exact_mut(F::BYTES)
-        .zip(high.chunks_exact_mut(F::BYTES))
-    {
+    for start in (0..low.len()).step_by(F::BYTES) {
+        let (l, h) = (
+            &mut low[start..start + F::BYTES],
+            &mut high[start..start + F::BYTES],
+        );
         let lo = F::read(l);
         let hi = F::read(h);
         let new_low = lo.add(coefficient.mul(hi));
@@ -32,11 +33,11 @@ pub(crate) fn fused_forward<F: Field>(low: &mut [u8], high: &mut [u8], coefficie
 /// Undoes [`fused_forward`] with the same coefficient, in place.
 pub(crate) fn fused_inverse<F: Field>(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
     debug_assert_eq!(low.len(), high.len());
-    debug_assert_eq!(low.len() % F::BYTES, 0);
-    for (l, h) in low
-        .chunks_exact_mut(F::BYTES)
-        .zip(high.chunks_exact_mut(F::BYTES))
-    {
+    for start in (0..low.len()).step_by(F::BYTES) {
+        let (l, h) = (
+            &mut low[start..start + F::BYTES],
+            &mut high[start..start + F::BYTES],
+        );
         let lo = F::read(l);
         let hi = F::read(h);
         let new_high = hi.add(lo);

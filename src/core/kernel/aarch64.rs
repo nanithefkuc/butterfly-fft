@@ -17,7 +17,7 @@
 
 use ::core::arch::aarch64::*;
 
-use fgf::{Gf8, Gf16, gf8, gf16};
+use fgf::{Gf8B, Gf16, gf8b, gf16};
 
 use super::scalar;
 
@@ -27,12 +27,12 @@ struct ScaleTable {
     high: [u8; 16],
 }
 
-fn scale_table(coefficient: gf8::Elem) -> ScaleTable {
+fn scale_table(coefficient: gf8b::Elem) -> ScaleTable {
     let mut low = [0; 16];
     let mut high = [0; 16];
     for nibble in 0..16u8 {
-        low[nibble as usize] = gf8::Elem(nibble).mul(coefficient).0;
-        high[nibble as usize] = gf8::Elem(nibble << 4).mul(coefficient).0;
+        low[nibble as usize] = gf8b::Elem(nibble).mul(coefficient).0;
+        high[nibble as usize] = gf8b::Elem(nibble << 4).mul(coefficient).0;
     }
     ScaleTable { low, high }
 }
@@ -107,7 +107,7 @@ unsafe fn scaled_vector_neon(
 pub(super) unsafe fn gf8_fused_forward_neon(
     low: &mut [u8],
     high: &mut [u8],
-    coefficient: gf8::Elem,
+    coefficient: gf8b::Elem,
 ) {
     let table = scale_table(coefficient);
     // SAFETY: the table arrays are 16 bytes; unaligned loads are allowed.
@@ -134,14 +134,14 @@ pub(super) unsafe fn gf8_fused_forward_neon(
         }
         offset += 16;
     }
-    scalar::fused_forward::<Gf8>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_forward::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
 }
 
 #[target_feature(enable = "neon")]
 pub(super) unsafe fn gf8_fused_inverse_neon(
     low: &mut [u8],
     high: &mut [u8],
-    coefficient: gf8::Elem,
+    coefficient: gf8b::Elem,
 ) {
     let table = scale_table(coefficient);
     // SAFETY: the table arrays are 16 bytes; unaligned loads are allowed.
@@ -168,7 +168,7 @@ pub(super) unsafe fn gf8_fused_inverse_neon(
         }
         offset += 16;
     }
-    scalar::fused_inverse::<Gf8>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_inverse::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
 }
 
 // ---------------------------------------------------------------------------
