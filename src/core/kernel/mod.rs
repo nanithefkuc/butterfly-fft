@@ -733,10 +733,11 @@ mod tests {
                 let high = pattern(0xc2, len);
                 let mut expected_low = low.clone();
                 let mut expected_high = high.clone();
-                for (l, h) in expected_low
-                    .chunks_exact_mut(2)
-                    .zip(expected_high.chunks_exact_mut(2))
-                {
+                for start in (0..expected_low.len()).step_by(2) {
+                    let (l, h) = (
+                        &mut expected_low[start..start + 2],
+                        &mut expected_high[start..start + 2],
+                    );
                     let lo = Gf16::read(l);
                     let hi = Gf16::read(h);
                     let new_low = lo.add(coefficient.mul(hi));
@@ -796,10 +797,11 @@ mod tests {
                 let src = pattern(0x19, len);
                 let mut dst = pattern(0xb3, len);
                 let mut expected = dst.clone();
-                for (out, input) in expected
-                    .chunks_exact_mut(F::BYTES)
-                    .zip(src.chunks_exact(F::BYTES))
-                {
+                for start in (0..expected.len()).step_by(F::BYTES) {
+                    let (out, input) = (
+                        &mut expected[start..start + F::BYTES],
+                        &src[start..start + F::BYTES],
+                    );
                     let product = F::read(input).mul(coefficient);
                     let acc = F::read(out).add(product);
                     F::write(out, acc);
@@ -824,10 +826,11 @@ mod tests {
             let mut destinations = pattern(0xc7, coefficients.len() * row_len);
             let mut expected = destinations.clone();
             for (row, &coefficient) in expected.chunks_exact_mut(row_len).zip(coefficients) {
-                for (out, input) in row
-                    .chunks_exact_mut(F::BYTES)
-                    .zip(source.chunks_exact(F::BYTES))
-                {
+                for start in (0..row.len()).step_by(F::BYTES) {
+                    let (out, input) = (
+                        &mut row[start..start + F::BYTES],
+                        &source[start..start + F::BYTES],
+                    );
                     let value = F::read(out).add(coefficient.mul(F::read(input)));
                     F::write(out, value);
                 }
