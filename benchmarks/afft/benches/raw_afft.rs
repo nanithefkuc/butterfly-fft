@@ -24,7 +24,7 @@ use butterfly_fft::core::kernel::backend as butterfly_fft_backend;
 use butterfly_fft::core::transform::TransformPlan;
 use butterfly_fft_bench::{LeopardBuffer, NanorsBuffer, leopard_backend, nanors_backend};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use fgf::{Gf8, Gf16};
+use fgf::{Gf8B, Gf16};
 
 const GF16_POINT_COUNTS: &[usize] = &[32, 128, 512, 2_048, 8_192, 32_768];
 const GF8_POINT_COUNTS: &[usize] = &[32, 64, 128, 256];
@@ -95,13 +95,18 @@ fn configure_group(
 }
 
 fn raw_gf16(c: &mut Criterion) {
-    let butterfly_fft_name = format!("butterfly-fft-{}", butterfly_fft_backend().name());
+    // Cantor basis, like leopard's FF16 and the GF8 panel: its unit
+    // derivative factors are what make the head-to-head meaningful.
+    let butterfly_fft_name = format!("butterfly-fft-cantor-{}", butterfly_fft_backend().name());
     let leopard_name = format!("leopard-{}", leopard_backend());
     let nanors_name = format!("nanors-{}", nanors_backend());
+    let cantor16 = cantor_basis::<Gf16>().expect("GF16 Cantor basis");
 
     for case in cases(GF16_POINT_COUNTS) {
+        let log_points = case.points.ilog2() as usize;
         let butterfly_fft =
-            TransformPlan::<Gf16>::shared(case.points).expect("valid butterfly-fft plan");
+            TransformPlan::<Gf16>::with_basis(case.points, &cantor16.elements()[..log_points])
+                .expect("valid butterfly-fft GF16 Cantor plan");
         let input = input_bytes(case.bytes);
 
         let mut butterfly_fft_forward = input.clone();
@@ -151,18 +156,22 @@ fn raw_gf16(c: &mut Criterion) {
         let case_id = case.id();
         let mut forward = c.benchmark_group("gf16/full_forward");
         configure_group(&mut forward, case.bytes);
-        forward.bench_with_input(BenchmarkId::new(&butterfly_fft_name, &case_id), &case, |b, case| {
-            b.iter_batched(
-                || input.clone(),
-                |mut rows| {
-                    butterfly_fft
-                        .forward_bytes(black_box(&mut rows), case.row_len)
-                        .expect("valid butterfly-fft row geometry");
-                    black_box(rows);
-                },
-                BatchSize::LargeInput,
-            );
-        });
+        forward.bench_with_input(
+            BenchmarkId::new(&butterfly_fft_name, &case_id),
+            &case,
+            |b, case| {
+                b.iter_batched(
+                    || input.clone(),
+                    |mut rows| {
+                        butterfly_fft
+                            .forward_bytes(black_box(&mut rows), case.row_len)
+                            .expect("valid butterfly-fft row geometry");
+                        black_box(rows);
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
         forward.bench_with_input(
             BenchmarkId::new(&leopard_name, &case_id),
             &case,
@@ -195,18 +204,22 @@ fn raw_gf16(c: &mut Criterion) {
 
         let mut inverse = c.benchmark_group("gf16/full_inverse");
         configure_group(&mut inverse, case.bytes);
-        inverse.bench_with_input(BenchmarkId::new(&butterfly_fft_name, &case_id), &case, |b, case| {
-            b.iter_batched(
-                || input.clone(),
-                |mut rows| {
-                    butterfly_fft
-                        .inverse_bytes(black_box(&mut rows), case.row_len)
-                        .expect("valid butterfly-fft row geometry");
-                    black_box(rows);
-                },
-                BatchSize::LargeInput,
-            );
-        });
+        inverse.bench_with_input(
+            BenchmarkId::new(&butterfly_fft_name, &case_id),
+            &case,
+            |b, case| {
+                b.iter_batched(
+                    || input.clone(),
+                    |mut rows| {
+                        butterfly_fft
+                            .inverse_bytes(black_box(&mut rows), case.row_len)
+                            .expect("valid butterfly-fft row geometry");
+                        black_box(rows);
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
         inverse.bench_with_input(
             BenchmarkId::new(&leopard_name, &case_id),
             &case,
@@ -239,22 +252,26 @@ fn raw_gf16(c: &mut Criterion) {
 
         let mut derivative = c.benchmark_group("gf16/derivative");
         configure_group(&mut derivative, case.bytes);
-        derivative.bench_with_input(BenchmarkId::new(&butterfly_fft_name, &case_id), &case, |b, case| {
-            b.iter_batched(
-                || (input.clone(), vec![0; case.bytes]),
-                |(coefficients, mut output)| {
-                    butterfly_fft
-                        .derivative_bytes(
-                            black_box(&coefficients),
-                            case.row_len,
-                            black_box(&mut output),
-                        )
-                        .expect("valid butterfly-fft row geometry");
-                    black_box(output);
-                },
-                BatchSize::LargeInput,
-            );
-        });
+        derivative.bench_with_input(
+            BenchmarkId::new(&butterfly_fft_name, &case_id),
+            &case,
+            |b, case| {
+                b.iter_batched(
+                    || (input.clone(), vec![0; case.bytes]),
+                    |(coefficients, mut output)| {
+                        butterfly_fft
+                            .derivative_bytes(
+                                black_box(&coefficients),
+                                case.row_len,
+                                black_box(&mut output),
+                            )
+                            .expect("valid butterfly-fft row geometry");
+                        black_box(output);
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
         derivative.bench_with_input(
             BenchmarkId::new(&leopard_name, &case_id),
             &case,
@@ -281,13 +298,13 @@ fn additive_gfni_supported() -> bool {
 
 fn raw_gf8(c: &mut Criterion) {
     let butterfly_fft_name = format!("butterfly-fft-cantor-{}", butterfly_fft_backend().name());
-    let butterfly_fft_basis = cantor_basis::<Gf8>().expect("GF8 Cantor basis");
+    let butterfly_fft_basis = cantor_basis::<Gf8B>().expect("GF8 Cantor basis");
     let additive_basis = CantorBasisLut11d;
     let has_additive_gfni = additive_gfni_supported();
 
     for case in cases(GF8_POINT_COUNTS) {
         let butterfly_fft =
-            TransformPlan::<Gf8>::with_basis(case.points, butterfly_fft_basis.elements())
+            TransformPlan::<Gf8B>::with_basis(case.points, butterfly_fft_basis.elements())
                 .expect("valid butterfly-fft Cantor plan");
         let input = input_bytes(case.bytes);
         let additive_input: Vec<Gf2p8_11d> = input.iter().copied().map(Gf2p8_11d::from).collect();
@@ -357,18 +374,22 @@ fn raw_gf8(c: &mut Criterion) {
         let case_id = case.id();
         let mut forward = c.benchmark_group("gf8/full_forward");
         configure_group(&mut forward, case.bytes);
-        forward.bench_with_input(BenchmarkId::new(&butterfly_fft_name, &case_id), &case, |b, case| {
-            b.iter_batched(
-                || input.clone(),
-                |mut rows| {
-                    butterfly_fft
-                        .forward_bytes(black_box(&mut rows), case.row_len)
-                        .expect("valid butterfly-fft GF8 geometry");
-                    black_box(rows);
-                },
-                BatchSize::LargeInput,
-            );
-        });
+        forward.bench_with_input(
+            BenchmarkId::new(&butterfly_fft_name, &case_id),
+            &case,
+            |b, case| {
+                b.iter_batched(
+                    || input.clone(),
+                    |mut rows| {
+                        butterfly_fft
+                            .forward_bytes(black_box(&mut rows), case.row_len)
+                            .expect("valid butterfly-fft GF8 geometry");
+                        black_box(rows);
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
         forward.bench_with_input(
             BenchmarkId::new("additive-lut", &case_id),
             &case,
@@ -415,18 +436,22 @@ fn raw_gf8(c: &mut Criterion) {
 
         let mut inverse = c.benchmark_group("gf8/full_inverse");
         configure_group(&mut inverse, case.bytes);
-        inverse.bench_with_input(BenchmarkId::new(&butterfly_fft_name, &case_id), &case, |b, case| {
-            b.iter_batched(
-                || input.clone(),
-                |mut rows| {
-                    butterfly_fft
-                        .inverse_bytes(black_box(&mut rows), case.row_len)
-                        .expect("valid butterfly-fft GF8 geometry");
-                    black_box(rows);
-                },
-                BatchSize::LargeInput,
-            );
-        });
+        inverse.bench_with_input(
+            BenchmarkId::new(&butterfly_fft_name, &case_id),
+            &case,
+            |b, case| {
+                b.iter_batched(
+                    || input.clone(),
+                    |mut rows| {
+                        butterfly_fft
+                            .inverse_bytes(black_box(&mut rows), case.row_len)
+                            .expect("valid butterfly-fft GF8 geometry");
+                        black_box(rows);
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
         inverse.bench_with_input(
             BenchmarkId::new("additive-lut", &case_id),
             &case,

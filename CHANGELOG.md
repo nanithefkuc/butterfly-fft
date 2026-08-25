@@ -42,3 +42,5 @@ releases follow [Semantic Versioning](https://semver.org/).
 - Fused butterflies gained a unit-coefficient fast path alongside the
   zero-coefficient path: `c = 1` runs as two XOR passes with no field
   multiply.
+- The benchmark harness tracks the crate's `fgf` pin again (`Gf8B` rename)
+  and compares GF(2^16) against leopard on the same Cantor basis.
