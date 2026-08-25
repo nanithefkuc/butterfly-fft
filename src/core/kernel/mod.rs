@@ -482,8 +482,10 @@ macro_rules! dispatch_butterfly {
 // Walkers in `core::transform` call this through the path re-export.
 pub(crate) use dispatch_butterfly;
 
-/// Fused forward butterfly on backend `B`, with the zero-coefficient
-/// XOR-coupling fast path (`high ^= low`, leaving `low` untouched).
+/// Fused forward butterfly on backend `B`, with fast paths for the trivial
+/// coefficients: zero couples the halves with one XOR (`high ^= low`, `low`
+/// untouched) and one swaps their roles through two XORs (`low' = low ⊕
+/// high`, `high' = low`).
 #[inline]
 pub(crate) fn fused_forward_with<F: ButterflyKernels, B: ButterflyBackend<F>>(
     low: &mut [u8],
@@ -494,13 +496,17 @@ pub(crate) fn fused_forward_with<F: ButterflyKernels, B: ButterflyBackend<F>>(
     debug_assert_eq!(low.len() % F::BYTES, 0);
     if coefficient.is_zero() {
         fgf::ops::add_assign::<F>(high, low);
+    } else if coefficient.is_one() {
+        fgf::ops::add_assign::<F>(low, high);
+        fgf::ops::add_assign::<F>(high, low);
     } else {
         B::forward_nonzero(low, high, coefficient);
     }
 }
 
-/// Fused inverse butterfly on backend `B`, with the zero-coefficient
-/// XOR-coupling fast path.
+/// Fused inverse butterfly on backend `B`, with the same trivial-coefficient
+/// fast paths: zero couples the halves with one XOR and one makes both
+/// outputs equal to `low ⊕ high`.
 #[inline]
 pub(crate) fn fused_inverse_with<F: ButterflyKernels, B: ButterflyBackend<F>>(
     low: &mut [u8],
@@ -511,6 +517,9 @@ pub(crate) fn fused_inverse_with<F: ButterflyKernels, B: ButterflyBackend<F>>(
     debug_assert_eq!(low.len() % F::BYTES, 0);
     if coefficient.is_zero() {
         fgf::ops::add_assign::<F>(high, low);
+    } else if coefficient.is_one() {
+        fgf::ops::add_assign::<F>(high, low);
+        fgf::ops::add_assign::<F>(low, high);
     } else {
         B::inverse_nonzero(low, high, coefficient);
     }
@@ -784,6 +793,45 @@ mod tests {
                 fused_forward::<F>(&mut low, &mut high, F::Elem::ZERO);
                 assert_eq!(low, original_low, "low must be untouched");
                 assert_eq!(high, expected_high);
+            }
+        }
+        check::<Gf8B>();
+        check::<Gf16>();
+    }
+
+    /// The unit-coefficient fast paths must equal the general butterfly with
+    /// `c = 1`: forward maps `(l, h)` to `(l⊕h, l)`, inverse to `(h, h⊕l)`,
+    /// and the pair undoes itself.
+    #[test]
+    fn one_coefficient_fast_paths_match_xor_semantics() {
+        fn check<F: ButterflyKernels>() {
+            for len in lengths(F::BYTES) {
+                let low = pattern(0x5a, len);
+                let high = pattern(0xc3, len);
+                let expected: Vec<u8> = low.iter().zip(&high).map(|(l, h)| l ^ h).collect();
+
+                let mut forward = (low.clone(), high.clone());
+                fused_forward::<F>(&mut forward.0, &mut forward.1, F::Elem::ONE);
+                assert_eq!(forward.0, expected, "forward-one low");
+                assert_eq!(forward.1, low, "forward-one high");
+
+                let mut inverse = (low.clone(), high.clone());
+                fused_inverse::<F>(&mut inverse.0, &mut inverse.1, F::Elem::ONE);
+                assert_eq!(inverse.0, high, "inverse-one low");
+                assert_eq!(inverse.1, expected, "inverse-one high");
+
+                // The fast paths must still undo each other.
+                fused_inverse::<F>(&mut forward.0, &mut forward.1, F::Elem::ONE);
+                assert_eq!(forward.0, low);
+                assert_eq!(forward.1, high);
+
+                // And agree with the scalar reference at the same coefficient.
+                let (mut reference_low, mut reference_high) = (low.clone(), high.clone());
+                scalar::fused_forward::<F>(&mut reference_low, &mut reference_high, F::Elem::ONE);
+                let (mut fast_low, mut fast_high) = (low.clone(), high.clone());
+                fused_forward::<F>(&mut fast_low, &mut fast_high, F::Elem::ONE);
+                assert_eq!(fast_low, reference_low);
+                assert_eq!(fast_high, reference_high);
             }
         }
         check::<Gf8B>();
