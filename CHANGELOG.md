@@ -22,19 +22,12 @@ releases follow [Semantic Versioning](https://semver.org/).
 - `basis::inverse_interpolate_bytes` composes inverse transform with
   novel-to-monomial conversion for allocation-free received-word
   interpolation.
-
 ### Changed
 
 - Renamed the crate from `cafft` to `butterfly-fft`, including its package,
   library identifier, repository URL, and dependent feature paths.
 - Replaced the former `fff` field dependency with `fgf`, preserving transform,
   basis-conversion, dispatch, and allocation behavior.
-- `TransformPlan::derivative_bytes` computes the formal derivative in a
-  single ascending sweep over row blocks, coupling each block with its
-  pristine source rows in one pass; plans whose derivative factors are all
-  zero or one (the Cantor basis) run the sweep on plain XORs with no field
-  multiplies. Measured up to 51% faster on bit-basis plans and within 8% of
-  leopard's hand-tuned decoder loop on small-row Cantor domains.
 - Transform byte walkers execute dimensions of three or fewer as explicit
   fused base cases instead of per-level recursion, cutting per-call kernel
   setup roughly fourfold at the bottom of the tree. Measured up to 34%
@@ -43,4 +36,7 @@ releases follow [Semantic Versioning](https://semver.org/).
   zero-coefficient path: `c = 1` runs as two XOR passes with no field
   multiply.
 - The benchmark harness tracks the crate's `fgf` pin again (`Gf8B` rename)
-  and compares GF(2^16) against leopard on the same Cantor basis.
+  and compares GF(2^16) against leopard on the same Cantor basis. Exact `D(c)`
+  and decoder-equivalent `c + D(c)` are now separate persistent-buffer series;
+  the prior comparison mislabeled Leopard's in-place augmented derivative as
+  an exact derivative and biased cache setup toward its single buffer.

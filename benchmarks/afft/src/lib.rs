@@ -9,6 +9,12 @@ unsafe extern "C" {
     fn butterfly_fft_leopard_forward(rows: *mut *mut c_void, points: u32, row_len: u64);
     fn butterfly_fft_leopard_inverse(rows: *mut *mut c_void, points: u32, row_len: u64);
     fn butterfly_fft_leopard_derivative(rows: *mut *mut c_void, points: u32, row_len: u64);
+    fn butterfly_fft_leopard_derivative_exact(
+        output: *mut *mut c_void,
+        coefficients: *const *mut c_void,
+        points: u32,
+        row_len: u64,
+    );
 
     fn butterfly_fft_nanors_init();
     fn butterfly_fft_nanors_backend() -> *const c_char;
@@ -118,13 +124,30 @@ impl LeopardBuffer {
         };
     }
 
-    /// Apply the formal-derivative loop used by Leopard's FF16 decoder.
-    pub fn derivative(&mut self) {
+    /// Add the formal derivative to the coefficient workspace in place.
+    pub fn derivative_plus_identity(&mut self) {
         initialize_leopard();
         // SAFETY: the same invariants as `forward` hold.
         unsafe {
             butterfly_fft_leopard_derivative(
                 self.pointers.as_mut_ptr(),
+                self.pointers.len() as u32,
+                self.row_len as u64,
+            )
+        };
+    }
+
+    /// Compute the exact formal derivative out of place.
+    pub fn derivative_exact(&mut self, coefficients: &Self) {
+        assert_eq!(self.row_len, coefficients.row_len);
+        assert_eq!(self.pointers.len(), coefficients.pointers.len());
+        initialize_leopard();
+        // SAFETY: both pointer tables contain the same number of disjoint,
+        // equal-length rows, and `self` and `coefficients` are distinct borrows.
+        unsafe {
+            butterfly_fft_leopard_derivative_exact(
+                self.pointers.as_mut_ptr(),
+                coefficients.pointers.as_ptr(),
                 self.pointers.len() as u32,
                 self.row_len as u64,
             )
@@ -223,8 +246,26 @@ mod tests {
         assert_eq!(rows.as_bytes(), original);
 
         let mut zero = LeopardBuffer::new(vec![0; 32 * 64], 32);
-        zero.derivative();
+        zero.derivative_plus_identity();
         assert!(zero.as_bytes().iter().all(|&byte| byte == 0));
+
+        let coefficients = input(32 * 64);
+        let mut expected = vec![0u8; coefficients.len()];
+        for source in 1usize..32 {
+            let mut bits = source;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                let destination = source ^ (1 << bit);
+                for offset in 0..64 {
+                    expected[destination * 64 + offset] ^= coefficients[source * 64 + offset];
+                }
+                bits &= bits - 1;
+            }
+        }
+        let input_rows = LeopardBuffer::new(coefficients, 32);
+        let mut exact = LeopardBuffer::new(vec![0xA5; 32 * 64], 32);
+        exact.derivative_exact(&input_rows);
+        assert_eq!(exact.as_bytes(), expected);
         assert!(!leopard_backend().is_empty());
     }
 
