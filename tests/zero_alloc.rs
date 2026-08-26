@@ -77,6 +77,8 @@ fn check_field<F: butterfly_fft::core::kernel::ButterflyKernels>(log_size: usize
         plan.inverse_bytes(&mut rows, row_len).unwrap();
         plan.derivative_bytes(&rows, row_len, &mut derivative)
             .unwrap();
+        plan.derivative_plus_identity_bytes(&mut derivative, row_len)
+            .unwrap();
         plan.forward(&mut values).unwrap();
         plan.inverse(&mut values).unwrap();
         plan.derivative(&values, &mut element_derivative).unwrap();
@@ -99,7 +101,9 @@ fn check_field<F: butterfly_fft::core::kernel::ButterflyKernels>(log_size: usize
 #[test]
 fn execution_allocates_nothing() {
     check_field::<Gf16>(10, 64);
+    check_field::<Gf16>(3, 1_024);
     check_field::<Gf16>(1, 2);
     check_field::<Gf8B>(8, 33);
+    check_field::<Gf8B>(3, 65_536);
     check_field::<Gf8B>(0, 1);
 }

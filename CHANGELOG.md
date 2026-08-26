@@ -22,12 +22,20 @@ releases follow [Semantic Versioning](https://semver.org/).
 - `basis::inverse_interpolate_bytes` composes inverse transform with
   novel-to-monomial conversion for allocation-free received-word
   interpolation.
+- `TransformPlan::derivative_plus_identity_bytes` and the matching
+  `ShiftedPlan` method compute `c + D(c)` in place for workflows that evaluate
+  only at roots of `c`.
+
 ### Changed
 
 - Renamed the crate from `cafft` to `butterfly-fft`, including its package,
   library identifier, repository URL, and dependent feature paths.
 - Replaced the former `fff` field dependency with `fgf`, preserving transform,
   basis-conversion, dispatch, and allocation behavior.
+- `TransformPlan::derivative_bytes` selects measured source-sweep,
+  overwrite-first, and destination-gather schedules by row geometry and
+  backend. Wide-row Cantor derivatives improved by up to 36%, while short rows
+  retain the lower-overhead sweep.
 - Transform byte walkers execute dimensions of three or fewer as explicit
   fused base cases instead of per-level recursion, cutting per-call kernel
   setup roughly fourfold at the bottom of the tree. Measured up to 34%

@@ -31,7 +31,8 @@ use fgf::ops::{self, Coeff};
 
 use crate::core::factors::{self, FactorTable};
 use crate::core::kernel::{
-    ButterflyBackend, ButterflyKernels, fused_forward_with, fused_inverse_with,
+    Backend, ButterflyBackend, ButterflyKernels, backend_for, fused_forward_with,
+    fused_inverse_with,
 };
 
 pub use crate::error::{PlanError, TransformLengthError};
@@ -41,6 +42,14 @@ pub use crate::error::{PlanError, TransformLengthError};
 /// Conservative cap keeping a factor table to a few megabytes per field;
 /// the field's own extension degree caps smaller fields further.
 pub const MAX_LOG_SIZE: usize = 20;
+
+/// Measured floor where avoiding the sweep's zero-and-accumulate traffic pays
+/// on GF(2^8)/GF(2^16). Shorter rows retain the lower-overhead sweep.
+const DERIVATIVE_OVERWRITE_ROW_MIN: usize = 1 << 10;
+
+/// Measured floor where GFNI's register-blocked gather beats overwrite-first
+/// for both GF(2^8) and GF(2^16). GF(2^8) reaches its gather crossover sooner.
+const DERIVATIVE_GATHER_ROW_MIN: usize = 1 << 16;
 
 /// Reusable additive-FFT plan for a power-of-two number of field elements.
 ///
@@ -410,13 +419,12 @@ impl<F: ButterflyKernels> TransformPlan<F> {
 
     /// Formal derivative over interleaved byte rows, out of place.
     ///
-    /// A single ascending sweep over row blocks: step `i` couples the
-    /// `lowbit(i)` rows below `i` with the matching rows above, whose contents
-    /// are still the untouched coefficients because sources are only ever
-    /// written by later steps. Each step applies one direction's factor over
-    /// contiguous ranges; when every factor is zero or one (the Cantor basis)
-    /// the sweep runs on plain XORs with no field multiplies. `derivative`
-    /// must not overlap `coefficients`.
+    /// Execution selects among equivalent source-sweep, overwrite-first, and
+    /// destination-gather schedules using measured row-length/backend
+    /// crossovers. Cantor factors are all units: sweep and overwrite reduce to
+    /// copies/XORs, while gather applies the same unit coefficients through
+    /// `fgf`'s register-blocked reduction. `derivative` must not overlap
+    /// `coefficients`.
     ///
     /// # Errors
     /// Returns [`TransformLengthError`] (lengths in bytes) unless both
@@ -433,6 +441,32 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     ) -> Result<(), TransformLengthError> {
         self.check_len_bytes(coefficients.len(), row_len)?;
         self.check_len_bytes(derivative.len(), row_len)?;
+        let selected = backend_for::<F>();
+        let measured = matches!(selected, Backend::Scalar | Backend::V3GfniCrypto);
+        if selected == Backend::V3GfniCrypto
+            && (row_len >= DERIVATIVE_GATHER_ROW_MIN
+                || (F::BYTES == 1 && row_len >= DERIVATIVE_OVERWRITE_ROW_MIN))
+        {
+            self.derivative_bytes_gather_unchecked(coefficients, row_len, derivative);
+        } else if measured && F::BYTES <= 2 && row_len >= DERIVATIVE_OVERWRITE_ROW_MIN {
+            derivative_bytes_overwrite_node::<F>(
+                coefficients,
+                derivative,
+                &self.prepared_derivative_factors,
+                self.log_size,
+            );
+        } else {
+            self.derivative_bytes_sweep_unchecked(coefficients, row_len, derivative);
+        }
+        Ok(())
+    }
+
+    fn derivative_bytes_sweep_unchecked(
+        &self,
+        coefficients: &[u8],
+        row_len: usize,
+        derivative: &mut [u8],
+    ) {
         let factors = &self.prepared_derivative_factors;
         derivative.fill(0);
         for index in 1..self.size {
@@ -455,6 +489,154 @@ impl<F: ButterflyKernels> TransformPlan<F> {
                 ops::mul_add_with::<F>(destination, factor, source);
             }
         }
+    }
+
+    /// Tuning-only exact derivative using the source-oriented lowbit sweep.
+    ///
+    /// This bypasses production crossover selection for benchmark controls.
+    /// It has the same output and geometry contract as
+    /// [`TransformPlan::derivative_bytes`] and allocates nothing.
+    ///
+    /// # Errors
+    /// As [`TransformPlan::derivative_bytes`].
+    ///
+    /// # Panics
+    /// As [`TransformPlan::derivative_bytes`].
+    #[cfg(feature = "internals")]
+    pub fn derivative_bytes_sweep(
+        &self,
+        coefficients: &[u8],
+        row_len: usize,
+        derivative: &mut [u8],
+    ) -> Result<(), TransformLengthError> {
+        self.check_len_bytes(coefficients.len(), row_len)?;
+        self.check_len_bytes(derivative.len(), row_len)?;
+        self.derivative_bytes_sweep_unchecked(coefficients, row_len, derivative);
+        Ok(())
+    }
+
+    /// Add the formal derivative to its coefficients in place: `c <- c + D(c)`.
+    ///
+    /// This augmented derivative is useful when the rows are subsequently
+    /// evaluated only at roots of the represented polynomial: at any root
+    /// `x`, `c(x) + D(c)(x) = D(c)(x)`. It is not the coefficient vector of
+    /// the exact formal derivative; use [`TransformPlan::derivative_bytes`]
+    /// when every derivative coefficient is required.
+    ///
+    /// The ascending sweep is safe in place because each source block lies
+    /// above its destination and has not yet been modified.
+    ///
+    /// # Errors
+    /// Returns [`TransformLengthError`] (lengths in bytes) unless `rows` holds
+    /// `size` rows of `row_len` bytes.
+    ///
+    /// # Panics
+    /// Under the row-geometry conditions documented by
+    /// [`TransformPlan::forward_bytes`].
+    pub fn derivative_plus_identity_bytes(
+        &self,
+        rows: &mut [u8],
+        row_len: usize,
+    ) -> Result<(), TransformLengthError> {
+        self.check_len_bytes(rows.len(), row_len)?;
+        let factors = &self.prepared_derivative_factors;
+        for index in 1..self.size {
+            let width = index & index.wrapping_neg();
+            let level = width.trailing_zeros() as usize;
+            let factor = &factors[level];
+            if factor.value().is_zero() {
+                continue;
+            }
+            let span = width * row_len;
+            let source_start = index * row_len;
+            let (below, source_and_above) = rows.split_at_mut(source_start);
+            let destination = &mut below[source_start - span..];
+            let source = &source_and_above[..span];
+            ops::mul_add_with::<F>(destination, factor, source);
+        }
+        Ok(())
+    }
+
+    /// Tuning-only exact derivative using one multi-source gather per output row.
+    ///
+    /// This exposes an alternative execution schedule for benchmark crossover
+    /// measurements. It has the same output and geometry contract as
+    /// [`TransformPlan::derivative_bytes`] and allocates nothing.
+    ///
+    /// # Errors
+    /// As [`TransformPlan::derivative_bytes`].
+    ///
+    /// # Panics
+    /// As [`TransformPlan::derivative_bytes`].
+    #[cfg(feature = "internals")]
+    pub fn derivative_bytes_gather(
+        &self,
+        coefficients: &[u8],
+        row_len: usize,
+        derivative: &mut [u8],
+    ) -> Result<(), TransformLengthError> {
+        self.check_len_bytes(coefficients.len(), row_len)?;
+        self.check_len_bytes(derivative.len(), row_len)?;
+
+        self.derivative_bytes_gather_unchecked(coefficients, row_len, derivative);
+        Ok(())
+    }
+
+    fn derivative_bytes_gather_unchecked(
+        &self,
+        coefficients: &[u8],
+        row_len: usize,
+        derivative: &mut [u8],
+    ) {
+        let mut values = [F::Elem::ZERO; MAX_LOG_SIZE];
+        let mut sources: [&[u8]; MAX_LOG_SIZE] = [&[]; MAX_LOG_SIZE];
+        for destination in 0..self.size {
+            let start = destination * row_len;
+            let output = &mut derivative[start..start + row_len];
+            output.fill(0);
+
+            let mut count = 0;
+            for level in 0..self.log_size {
+                let bit = 1 << level;
+                let factor = self.table.derivative_factors[level];
+                if destination & bit != 0 || factor.is_zero() {
+                    continue;
+                }
+                let source_start = (destination | bit) * row_len;
+                values[count] = factor;
+                sources[count] = &coefficients[source_start..source_start + row_len];
+                count += 1;
+            }
+            ops::mul_add_gather::<F>(output, &values[..count], &sources[..count]);
+        }
+    }
+
+    /// Tuning-only exact derivative initialized from first contributions.
+    ///
+    /// This exposes an alternative execution schedule for benchmark crossover
+    /// measurements. It has the same output and geometry contract as
+    /// [`TransformPlan::derivative_bytes`] and allocates nothing.
+    ///
+    /// # Errors
+    /// As [`TransformPlan::derivative_bytes`].
+    ///
+    /// # Panics
+    /// As [`TransformPlan::derivative_bytes`].
+    #[cfg(feature = "internals")]
+    pub fn derivative_bytes_overwrite(
+        &self,
+        coefficients: &[u8],
+        row_len: usize,
+        derivative: &mut [u8],
+    ) -> Result<(), TransformLengthError> {
+        self.check_len_bytes(coefficients.len(), row_len)?;
+        self.check_len_bytes(derivative.len(), row_len)?;
+        derivative_bytes_overwrite_node::<F>(
+            coefficients,
+            derivative,
+            &self.prepared_derivative_factors,
+            self.log_size,
+        );
         Ok(())
     }
 
@@ -842,6 +1024,43 @@ fn inverse_node<E: Elem>(values: &mut [E], factors: &[E], node: usize, dimension
         values[position] = left.add(factor.mul(high));
         values[half + position] = high;
     }
+}
+
+fn derivative_bytes_add_node<F: ButterflyKernels>(
+    coefficients: &[u8],
+    derivative: &mut [u8],
+    factors: &[Coeff<F>],
+    dimension: usize,
+) {
+    if dimension == 0 {
+        return;
+    }
+    let half = coefficients.len() / 2;
+    let (coefficient_low, coefficient_high) = coefficients.split_at(half);
+    let (derivative_low, derivative_high) = derivative.split_at_mut(half);
+    let factor = &factors[dimension - 1];
+    ops::mul_add_with::<F>(derivative_low, factor, coefficient_high);
+    derivative_bytes_add_node::<F>(coefficient_low, derivative_low, factors, dimension - 1);
+    derivative_bytes_add_node::<F>(coefficient_high, derivative_high, factors, dimension - 1);
+}
+
+fn derivative_bytes_overwrite_node<F: ButterflyKernels>(
+    coefficients: &[u8],
+    derivative: &mut [u8],
+    factors: &[Coeff<F>],
+    dimension: usize,
+) {
+    if dimension == 0 {
+        derivative.fill(0);
+        return;
+    }
+    let half = coefficients.len() / 2;
+    let (coefficient_low, coefficient_high) = coefficients.split_at(half);
+    let (derivative_low, derivative_high) = derivative.split_at_mut(half);
+    let factor = &factors[dimension - 1];
+    ops::mul_into_with::<F>(derivative_low, factor, coefficient_high);
+    derivative_bytes_add_node::<F>(coefficient_low, derivative_low, factors, dimension - 1);
+    derivative_bytes_overwrite_node::<F>(coefficient_high, derivative_high, factors, dimension - 1);
 }
 
 /// Deepest dimension handled by the explicit fused base cases instead of
@@ -1473,6 +1692,57 @@ mod tests {
         check::<Gf16>(&mut 37);
     }
 
+    #[test]
+    fn byte_derivative_paths_match_monomial_differentiation() {
+        fn check<F: ButterflyKernels>(state: &mut u32, row_len: usize) {
+            let size = 8;
+            let plan = TransformPlan::<F>::new(size).unwrap();
+            let coefficients = random_elements::<F>(state, size);
+
+            let mut monomial = coefficients.clone();
+            crate::basis::novel_to_monomial(&mut monomial, &plan).unwrap();
+            let mut expected = vec![F::Elem::ZERO; size];
+            for degree in (1..size).step_by(2) {
+                expected[degree - 1] = monomial[degree];
+            }
+            crate::basis::monomial_to_novel(&mut expected, &plan).unwrap();
+
+            let mut coefficient_rows = vec![0u8; size * row_len];
+            for (row, &coefficient) in coefficient_rows
+                .chunks_exact_mut(row_len)
+                .zip(&coefficients)
+            {
+                for element in row.chunks_mut(F::BYTES) {
+                    F::write(element, coefficient);
+                }
+            }
+
+            let mut derivative_rows = vec![0xA5; coefficient_rows.len()];
+            plan.derivative_bytes(&coefficient_rows, row_len, &mut derivative_rows)
+                .unwrap();
+            let mut augmented_rows = coefficient_rows.clone();
+            plan.derivative_plus_identity_bytes(&mut augmented_rows, row_len)
+                .unwrap();
+
+            for row in 0..size {
+                let expected_derivative = expected[row];
+                let expected_augmented = coefficients[row].add(expected_derivative);
+                for element in derivative_rows[row * row_len..][..row_len].chunks(F::BYTES) {
+                    assert_eq!(F::read(element), expected_derivative);
+                }
+                for element in augmented_rows[row * row_len..][..row_len].chunks(F::BYTES) {
+                    assert_eq!(F::read(element), expected_augmented);
+                }
+            }
+        }
+
+        // Exercise overwrite-first with nontrivial factors on every measured
+        // backend, and GFNI gather at its wide-row crossover.
+        check::<Gf8B>(&mut 101, DERIVATIVE_OVERWRITE_ROW_MIN);
+        check::<Gf16>(&mut 103, DERIVATIVE_OVERWRITE_ROW_MIN);
+        check::<Gf16>(&mut 107, DERIVATIVE_GATHER_ROW_MIN);
+    }
+
     /// The byte-derivative sweep must match the straightforward
     /// one-direction-at-a-time schedule (kept here as an independent oracle),
     /// over both the default basis (generic scaled steps) and the Cantor
@@ -1527,6 +1797,19 @@ mod tests {
                             actual, expected,
                             "{label} derivative diverged at log {log_size} lanes {lane_count} preset {preset:#x}"
                         );
+
+                        let mut augmented = coefficients.clone();
+                        plan.derivative_plus_identity_bytes(&mut augmented, row_len)
+                            .unwrap();
+                        let expected_augmented: Vec<u8> = coefficients
+                            .iter()
+                            .zip(&expected)
+                            .map(|(&coefficient, &derivative)| coefficient ^ derivative)
+                            .collect();
+                        assert_eq!(
+                            augmented, expected_augmented,
+                            "{label} augmented derivative diverged at log {log_size} lanes {lane_count} preset {preset:#x}"
+                        );
                     }
                 }
             }
@@ -1545,6 +1828,49 @@ mod tests {
         }
         check::<Gf8B>(&mut 41);
         check::<Gf16>(&mut 43);
+    }
+
+    #[cfg(feature = "internals")]
+    #[test]
+    fn derivative_production_crossovers_match_cantor_oracle() {
+        fn check<F: ButterflyKernels>()
+        where
+            <F as Field>::Elem: Send + Sync,
+        {
+            let size = 8;
+            let basis = crate::basis::cantor_basis::<F>().unwrap();
+            let plan =
+                TransformPlan::<F>::with_basis(size, &basis.elements()[..size.ilog2() as usize])
+                    .unwrap();
+            for row_len in [DERIVATIVE_OVERWRITE_ROW_MIN, DERIVATIVE_GATHER_ROW_MIN] {
+                let coefficients: Vec<u8> = (0..size * row_len)
+                    .map(|index| index.to_le_bytes()[0].wrapping_mul(73).wrapping_add(19))
+                    .collect();
+                let mut expected = vec![0u8; coefficients.len()];
+                for source in 1..size {
+                    let mut bits = source;
+                    while bits != 0 {
+                        let bit = bits.trailing_zeros() as usize;
+                        let destination = source ^ (1 << bit);
+                        let source_start = source * row_len;
+                        let destination_start = destination * row_len;
+                        for offset in 0..row_len {
+                            expected[destination_start + offset] ^=
+                                coefficients[source_start + offset];
+                        }
+                        bits &= bits - 1;
+                    }
+                }
+
+                let mut actual = vec![0xA5; coefficients.len()];
+                plan.derivative_bytes(&coefficients, row_len, &mut actual)
+                    .unwrap();
+                assert_eq!(actual, expected, "{} row length {row_len}", F::NAME);
+            }
+        }
+
+        check::<Gf8B>();
+        check::<Gf16>();
     }
 
     #[test]

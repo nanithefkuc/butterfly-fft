@@ -230,6 +230,75 @@ impl<F: ButterflyKernels> ShiftedPlan<F> {
             .derivative_bytes(coefficients, row_len, derivative)
     }
 
+    /// Add the formal derivative to its coefficients in place.
+    ///
+    /// # Errors
+    /// As [`TransformPlan::derivative_plus_identity_bytes`].
+    ///
+    /// # Panics
+    /// As [`TransformPlan::derivative_plus_identity_bytes`].
+    pub fn derivative_plus_identity_bytes(
+        &self,
+        rows: &mut [u8],
+        row_len: usize,
+    ) -> Result<(), TransformLengthError> {
+        self.base.derivative_plus_identity_bytes(rows, row_len)
+    }
+
+    /// Tuning-only source-sweep derivative control.
+    ///
+    /// # Errors
+    /// As [`TransformPlan::derivative_bytes_sweep`].
+    ///
+    /// # Panics
+    /// As [`TransformPlan::derivative_bytes_sweep`].
+    #[cfg(feature = "internals")]
+    pub fn derivative_bytes_sweep(
+        &self,
+        coefficients: &[u8],
+        row_len: usize,
+        derivative: &mut [u8],
+    ) -> Result<(), TransformLengthError> {
+        self.base
+            .derivative_bytes_sweep(coefficients, row_len, derivative)
+    }
+
+    /// Tuning-only destination-gather derivative control.
+    ///
+    /// # Errors
+    /// As [`TransformPlan::derivative_bytes_gather`].
+    ///
+    /// # Panics
+    /// As [`TransformPlan::derivative_bytes_gather`].
+    #[cfg(feature = "internals")]
+    pub fn derivative_bytes_gather(
+        &self,
+        coefficients: &[u8],
+        row_len: usize,
+        derivative: &mut [u8],
+    ) -> Result<(), TransformLengthError> {
+        self.base
+            .derivative_bytes_gather(coefficients, row_len, derivative)
+    }
+
+    /// Tuning-only overwrite-first derivative control.
+    ///
+    /// # Errors
+    /// As [`TransformPlan::derivative_bytes_overwrite`].
+    ///
+    /// # Panics
+    /// As [`TransformPlan::derivative_bytes_overwrite`].
+    #[cfg(feature = "internals")]
+    pub fn derivative_bytes_overwrite(
+        &self,
+        coefficients: &[u8],
+        row_len: usize,
+        derivative: &mut [u8],
+    ) -> Result<(), TransformLengthError> {
+        self.base
+            .derivative_bytes_overwrite(coefficients, row_len, derivative)
+    }
+
     /// Byte-row coset forward transform restricted to `selected` rows.
     ///
     /// # Errors
@@ -554,6 +623,15 @@ mod tests {
             .derivative_bytes(&coefficient_rows, row_len, &mut expected_rows)
             .unwrap();
         assert_eq!(derivative_rows, expected_rows);
+
+        let mut augmented_rows = coefficient_rows.clone();
+        let mut expected_augmented_rows = coefficient_rows.clone();
+        plan.derivative_plus_identity_bytes(&mut augmented_rows, row_len)
+            .unwrap();
+        plan.plan()
+            .derivative_plus_identity_bytes(&mut expected_augmented_rows, row_len)
+            .unwrap();
+        assert_eq!(augmented_rows, expected_augmented_rows);
 
         let half = plan.size() / 2;
         let mut padded = coefficients[..half].to_vec();
