@@ -31,7 +31,8 @@ use fgf::ops::{self, Coeff};
 
 use crate::core::factors::{self, FactorTable};
 use crate::core::kernel::{
-    ButterflyBackend, ButterflyKernels, fused_forward_with, fused_inverse_with,
+    Backend, ButterflyBackend, ButterflyKernels, backend_for, fused_forward_with,
+    fused_inverse_with,
 };
 
 pub use crate::error::{PlanError, TransformLengthError};
@@ -41,6 +42,14 @@ pub use crate::error::{PlanError, TransformLengthError};
 /// Conservative cap keeping a factor table to a few megabytes per field;
 /// the field's own extension degree caps smaller fields further.
 pub const MAX_LOG_SIZE: usize = 20;
+
+/// Measured floor where avoiding the sweep's zero-and-accumulate traffic pays
+/// on GF(2^8)/GF(2^16). Shorter rows retain the lower-overhead sweep.
+const DERIVATIVE_OVERWRITE_ROW_MIN: usize = 1 << 10;
+
+/// Measured floor where GFNI's register-blocked gather beats overwrite-first
+/// for both GF(2^8) and GF(2^16). GF(2^8) reaches its gather crossover sooner.
+const DERIVATIVE_GATHER_ROW_MIN: usize = 1 << 16;
 
 /// Reusable additive-FFT plan for a power-of-two number of field elements.
 ///
@@ -61,6 +70,9 @@ pub struct TransformPlan<F: ButterflyKernels> {
     table: FactorTable<F>,
     /// Derivative factors resolved once into fgf's selected backend form.
     prepared_derivative_factors: Vec<Coeff<F>>,
+    /// Whether every derivative factor is zero or one, letting the byte
+    /// derivative sweep run on plain XORs (true for the Cantor basis).
+    derivative_factors_trivial: bool,
     /// The ordered-basis prefix `β_0 … β_{log_size-1}` defining the domain.
     basis: Vec<F::Elem>,
     /// Coset shift `α`: zero for a plain subspace, nonzero for an affine
@@ -169,17 +181,21 @@ impl<F: ButterflyKernels> TransformPlan<F> {
         basis: Vec<F::Elem>,
         shift: F::Elem,
     ) -> Self {
-        let prepared_derivative_factors = table
+        let prepared_derivative_factors: ::alloc::vec::Vec<Coeff<F>> = table
             .derivative_factors
             .iter()
             .copied()
             .map(Coeff::<F>::new)
             .collect();
+        let derivative_factors_trivial = prepared_derivative_factors
+            .iter()
+            .all(|factor| factor.value().is_zero() || factor.value().is_one());
         Self {
             size,
             log_size,
             table,
             prepared_derivative_factors,
+            derivative_factors_trivial,
             basis,
             shift,
         }
@@ -403,6 +419,13 @@ impl<F: ButterflyKernels> TransformPlan<F> {
 
     /// Formal derivative over interleaved byte rows, out of place.
     ///
+    /// Execution selects among equivalent source-sweep, overwrite-first, and
+    /// destination-gather schedules using measured row-length/backend
+    /// crossovers. Cantor factors are all units: sweep and overwrite reduce to
+    /// copies/XORs, while gather applies the same unit coefficients through
+    /// `fgf`'s register-blocked reduction. `derivative` must not overlap
+    /// `coefficients`.
+    ///
     /// # Errors
     /// Returns [`TransformLengthError`] (lengths in bytes) unless both
     /// buffers hold `size` rows of `row_len` bytes.
@@ -418,23 +441,202 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     ) -> Result<(), TransformLengthError> {
         self.check_len_bytes(coefficients.len(), row_len)?;
         self.check_len_bytes(derivative.len(), row_len)?;
+        let selected = backend_for::<F>();
+        let measured = matches!(selected, Backend::Scalar | Backend::V3GfniCrypto);
+        if selected == Backend::V3GfniCrypto
+            && (row_len >= DERIVATIVE_GATHER_ROW_MIN
+                || (F::BYTES == 1 && row_len >= DERIVATIVE_OVERWRITE_ROW_MIN))
+        {
+            self.derivative_bytes_gather_unchecked(coefficients, row_len, derivative);
+        } else if measured && F::BYTES <= 2 && row_len >= DERIVATIVE_OVERWRITE_ROW_MIN {
+            derivative_bytes_overwrite_node::<F>(
+                coefficients,
+                derivative,
+                &self.prepared_derivative_factors,
+                self.log_size,
+            );
+        } else {
+            self.derivative_bytes_sweep_unchecked(coefficients, row_len, derivative);
+        }
+        Ok(())
+    }
+
+    fn derivative_bytes_sweep_unchecked(
+        &self,
+        coefficients: &[u8],
+        row_len: usize,
+        derivative: &mut [u8],
+    ) {
+        let factors = &self.prepared_derivative_factors;
         derivative.fill(0);
-        for (bit, factor) in self.prepared_derivative_factors.iter().enumerate() {
-            let half_len = (1 << bit) * row_len;
-            let block_len = half_len * 2;
-            // For a fixed bit, every source with that bit set occupies the
-            // upper half of a block and contributes to the matching lower half.
-            for (source_block, destination_block) in coefficients
-                .chunks_exact(block_len)
-                .zip(derivative.chunks_exact_mut(block_len))
-            {
-                ops::mul_add_with::<F>(
-                    &mut destination_block[..half_len],
-                    factor,
-                    &source_block[half_len..],
-                );
+        for index in 1..self.size {
+            let width = index & index.wrapping_neg();
+            let level = width.trailing_zeros() as usize;
+            let factor = &factors[level];
+            if factor.value().is_zero() {
+                continue;
+            }
+            let span = width * row_len;
+            let source_start = index * row_len;
+            // The destination block sits just below the source block; both
+            // stay within the validated buffer geometry.
+            let destination = &mut derivative[source_start - span..source_start];
+            let source = &coefficients[source_start..source_start + span];
+            debug_assert!(!factor.value().is_zero());
+            if self.derivative_factors_trivial {
+                ops::add_assign::<F>(destination, source);
+            } else {
+                ops::mul_add_with::<F>(destination, factor, source);
             }
         }
+    }
+
+    /// Tuning-only exact derivative using the source-oriented lowbit sweep.
+    ///
+    /// This bypasses production crossover selection for benchmark controls.
+    /// It has the same output and geometry contract as
+    /// [`TransformPlan::derivative_bytes`] and allocates nothing.
+    ///
+    /// # Errors
+    /// As [`TransformPlan::derivative_bytes`].
+    ///
+    /// # Panics
+    /// As [`TransformPlan::derivative_bytes`].
+    #[cfg(feature = "internals")]
+    pub fn derivative_bytes_sweep(
+        &self,
+        coefficients: &[u8],
+        row_len: usize,
+        derivative: &mut [u8],
+    ) -> Result<(), TransformLengthError> {
+        self.check_len_bytes(coefficients.len(), row_len)?;
+        self.check_len_bytes(derivative.len(), row_len)?;
+        self.derivative_bytes_sweep_unchecked(coefficients, row_len, derivative);
+        Ok(())
+    }
+
+    /// Add the formal derivative to its coefficients in place: `c <- c + D(c)`.
+    ///
+    /// This augmented derivative is useful when the rows are subsequently
+    /// evaluated only at roots of the represented polynomial: at any root
+    /// `x`, `c(x) + D(c)(x) = D(c)(x)`. It is not the coefficient vector of
+    /// the exact formal derivative; use [`TransformPlan::derivative_bytes`]
+    /// when every derivative coefficient is required.
+    ///
+    /// The ascending sweep is safe in place because each source block lies
+    /// above its destination and has not yet been modified.
+    ///
+    /// # Errors
+    /// Returns [`TransformLengthError`] (lengths in bytes) unless `rows` holds
+    /// `size` rows of `row_len` bytes.
+    ///
+    /// # Panics
+    /// Under the row-geometry conditions documented by
+    /// [`TransformPlan::forward_bytes`].
+    pub fn derivative_plus_identity_bytes(
+        &self,
+        rows: &mut [u8],
+        row_len: usize,
+    ) -> Result<(), TransformLengthError> {
+        self.check_len_bytes(rows.len(), row_len)?;
+        let factors = &self.prepared_derivative_factors;
+        for index in 1..self.size {
+            let width = index & index.wrapping_neg();
+            let level = width.trailing_zeros() as usize;
+            let factor = &factors[level];
+            if factor.value().is_zero() {
+                continue;
+            }
+            let span = width * row_len;
+            let source_start = index * row_len;
+            let (below, source_and_above) = rows.split_at_mut(source_start);
+            let destination = &mut below[source_start - span..];
+            let source = &source_and_above[..span];
+            ops::mul_add_with::<F>(destination, factor, source);
+        }
+        Ok(())
+    }
+
+    /// Tuning-only exact derivative using one multi-source gather per output row.
+    ///
+    /// This exposes an alternative execution schedule for benchmark crossover
+    /// measurements. It has the same output and geometry contract as
+    /// [`TransformPlan::derivative_bytes`] and allocates nothing.
+    ///
+    /// # Errors
+    /// As [`TransformPlan::derivative_bytes`].
+    ///
+    /// # Panics
+    /// As [`TransformPlan::derivative_bytes`].
+    #[cfg(feature = "internals")]
+    pub fn derivative_bytes_gather(
+        &self,
+        coefficients: &[u8],
+        row_len: usize,
+        derivative: &mut [u8],
+    ) -> Result<(), TransformLengthError> {
+        self.check_len_bytes(coefficients.len(), row_len)?;
+        self.check_len_bytes(derivative.len(), row_len)?;
+
+        self.derivative_bytes_gather_unchecked(coefficients, row_len, derivative);
+        Ok(())
+    }
+
+    fn derivative_bytes_gather_unchecked(
+        &self,
+        coefficients: &[u8],
+        row_len: usize,
+        derivative: &mut [u8],
+    ) {
+        let mut values = [F::Elem::ZERO; MAX_LOG_SIZE];
+        let mut sources: [&[u8]; MAX_LOG_SIZE] = [&[]; MAX_LOG_SIZE];
+        for destination in 0..self.size {
+            let start = destination * row_len;
+            let output = &mut derivative[start..start + row_len];
+            output.fill(0);
+
+            let mut count = 0;
+            for level in 0..self.log_size {
+                let bit = 1 << level;
+                let factor = self.table.derivative_factors[level];
+                if destination & bit != 0 || factor.is_zero() {
+                    continue;
+                }
+                let source_start = (destination | bit) * row_len;
+                values[count] = factor;
+                sources[count] = &coefficients[source_start..source_start + row_len];
+                count += 1;
+            }
+            ops::mul_add_gather::<F>(output, &values[..count], &sources[..count]);
+        }
+    }
+
+    /// Tuning-only exact derivative initialized from first contributions.
+    ///
+    /// This exposes an alternative execution schedule for benchmark crossover
+    /// measurements. It has the same output and geometry contract as
+    /// [`TransformPlan::derivative_bytes`] and allocates nothing.
+    ///
+    /// # Errors
+    /// As [`TransformPlan::derivative_bytes`].
+    ///
+    /// # Panics
+    /// As [`TransformPlan::derivative_bytes`].
+    #[cfg(feature = "internals")]
+    pub fn derivative_bytes_overwrite(
+        &self,
+        coefficients: &[u8],
+        row_len: usize,
+        derivative: &mut [u8],
+    ) -> Result<(), TransformLengthError> {
+        self.check_len_bytes(coefficients.len(), row_len)?;
+        self.check_len_bytes(derivative.len(), row_len)?;
+        derivative_bytes_overwrite_node::<F>(
+            coefficients,
+            derivative,
+            &self.prepared_derivative_factors,
+            self.log_size,
+        );
         Ok(())
     }
 
@@ -824,20 +1026,159 @@ fn inverse_node<E: Elem>(values: &mut [E], factors: &[E], node: usize, dimension
     }
 }
 
+fn derivative_bytes_add_node<F: ButterflyKernels>(
+    coefficients: &[u8],
+    derivative: &mut [u8],
+    factors: &[Coeff<F>],
+    dimension: usize,
+) {
+    if dimension == 0 {
+        return;
+    }
+    let half = coefficients.len() / 2;
+    let (coefficient_low, coefficient_high) = coefficients.split_at(half);
+    let (derivative_low, derivative_high) = derivative.split_at_mut(half);
+    let factor = &factors[dimension - 1];
+    ops::mul_add_with::<F>(derivative_low, factor, coefficient_high);
+    derivative_bytes_add_node::<F>(coefficient_low, derivative_low, factors, dimension - 1);
+    derivative_bytes_add_node::<F>(coefficient_high, derivative_high, factors, dimension - 1);
+}
+
+fn derivative_bytes_overwrite_node<F: ButterflyKernels>(
+    coefficients: &[u8],
+    derivative: &mut [u8],
+    factors: &[Coeff<F>],
+    dimension: usize,
+) {
+    if dimension == 0 {
+        derivative.fill(0);
+        return;
+    }
+    let half = coefficients.len() / 2;
+    let (coefficient_low, coefficient_high) = coefficients.split_at(half);
+    let (derivative_low, derivative_high) = derivative.split_at_mut(half);
+    let factor = &factors[dimension - 1];
+    ops::mul_into_with::<F>(derivative_low, factor, coefficient_high);
+    derivative_bytes_add_node::<F>(coefficient_low, derivative_low, factors, dimension - 1);
+    derivative_bytes_overwrite_node::<F>(coefficient_high, derivative_high, factors, dimension - 1);
+}
+
+/// Deepest dimension handled by the explicit fused base cases instead of
+/// recursion: a subtree spans at most `2^BASE_DIMENSION` rows, whose
+/// butterflies all touch one cache-resident block.
+const BASE_DIMENSION: usize = 3;
+
+/// Fused base case, forward order: the node's butterfly first, then both
+/// child subtrees depth-first. All butterflies stay within one small row
+/// block, so per-call kernel setup amortizes over the subtree instead of
+/// paying one call frame per level.
+fn forward_bytes_base<F: ButterflyKernels, B: ButterflyBackend<F>>(
+    rows: &mut [u8],
+    factors: &[F::Elem],
+    node: usize,
+    dimension: usize,
+) {
+    match dimension {
+        1 => {
+            let (low_half, high_half) = rows.split_at_mut(rows.len() / 2);
+            fused_forward_with::<F, B>(low_half, high_half, factors[node]);
+        }
+        2 => {
+            let half_bytes = rows.len() / 2;
+            let quarter_bytes = half_bytes / 2;
+            let (low_half, high_half) = rows.split_at_mut(half_bytes);
+            fused_forward_with::<F, B>(low_half, high_half, factors[node]);
+            let (low_low, low_high) = low_half.split_at_mut(quarter_bytes);
+            let (high_low, high_high) = high_half.split_at_mut(quarter_bytes);
+            fused_forward_with::<F, B>(low_low, low_high, factors[node * 2]);
+            fused_forward_with::<F, B>(high_low, high_high, factors[node * 2 + 1]);
+        }
+        3 => {
+            let half_bytes = rows.len() / 2;
+            let quarter_bytes = half_bytes / 2;
+            let eighth_bytes = quarter_bytes / 2;
+            let (low_half, high_half) = rows.split_at_mut(half_bytes);
+            fused_forward_with::<F, B>(low_half, high_half, factors[node]);
+            let (low_low, low_high) = low_half.split_at_mut(quarter_bytes);
+            let (high_low, high_high) = high_half.split_at_mut(quarter_bytes);
+            fused_forward_with::<F, B>(low_low, low_high, factors[node * 2]);
+            fused_forward_with::<F, B>(high_low, high_high, factors[node * 2 + 1]);
+            // Leaf level: each remaining quarter is one row pair.
+            let (r0, r1) = low_low.split_at_mut(eighth_bytes);
+            let (r2, r3) = low_high.split_at_mut(eighth_bytes);
+            let (r4, r5) = high_low.split_at_mut(eighth_bytes);
+            let (r6, r7) = high_high.split_at_mut(eighth_bytes);
+            fused_forward_with::<F, B>(r0, r1, factors[node * 4]);
+            fused_forward_with::<F, B>(r2, r3, factors[node * 4 + 1]);
+            fused_forward_with::<F, B>(r4, r5, factors[node * 4 + 2]);
+            fused_forward_with::<F, B>(r6, r7, factors[node * 4 + 3]);
+        }
+        _ => {}
+    }
+}
+
+/// Fused base case, inverse order: both child subtrees first, then the
+/// node's butterfly.
+fn inverse_bytes_base<F: ButterflyKernels, B: ButterflyBackend<F>>(
+    rows: &mut [u8],
+    factors: &[F::Elem],
+    node: usize,
+    dimension: usize,
+) {
+    match dimension {
+        1 => {
+            let (low_half, high_half) = rows.split_at_mut(rows.len() / 2);
+            fused_inverse_with::<F, B>(low_half, high_half, factors[node]);
+        }
+        2 => {
+            let half_bytes = rows.len() / 2;
+            let quarter_bytes = half_bytes / 2;
+            let (low_half, high_half) = rows.split_at_mut(half_bytes);
+            let (low_low, low_high) = low_half.split_at_mut(quarter_bytes);
+            let (high_low, high_high) = high_half.split_at_mut(quarter_bytes);
+            fused_inverse_with::<F, B>(low_low, low_high, factors[node * 2]);
+            fused_inverse_with::<F, B>(high_low, high_high, factors[node * 2 + 1]);
+            fused_inverse_with::<F, B>(low_half, high_half, factors[node]);
+        }
+        3 => {
+            let half_bytes = rows.len() / 2;
+            let quarter_bytes = half_bytes / 2;
+            let eighth_bytes = quarter_bytes / 2;
+            let (low_half, high_half) = rows.split_at_mut(half_bytes);
+            let (low_low, low_high) = low_half.split_at_mut(quarter_bytes);
+            let (high_low, high_high) = high_half.split_at_mut(quarter_bytes);
+            let (r0, r1) = low_low.split_at_mut(eighth_bytes);
+            let (r2, r3) = low_high.split_at_mut(eighth_bytes);
+            let (r4, r5) = high_low.split_at_mut(eighth_bytes);
+            let (r6, r7) = high_high.split_at_mut(eighth_bytes);
+            fused_inverse_with::<F, B>(r0, r1, factors[node * 4]);
+            fused_inverse_with::<F, B>(r2, r3, factors[node * 4 + 1]);
+            fused_inverse_with::<F, B>(r4, r5, factors[node * 4 + 2]);
+            fused_inverse_with::<F, B>(r6, r7, factors[node * 4 + 3]);
+            fused_inverse_with::<F, B>(low_low, low_high, factors[node * 2]);
+            fused_inverse_with::<F, B>(high_low, high_high, factors[node * 2 + 1]);
+            fused_inverse_with::<F, B>(low_half, high_half, factors[node]);
+        }
+        _ => {}
+    }
+}
+
 fn forward_bytes_node<F: ButterflyKernels, B: ButterflyBackend<F>>(
     rows: &mut [u8],
     factors: &[F::Elem],
     node: usize,
     dimension: usize,
 ) {
+    if dimension <= BASE_DIMENSION {
+        forward_bytes_base::<F, B>(rows, factors, node, dimension);
+        return;
+    }
     let half_bytes = rows.len() / 2;
     let factor = factors[node];
     let (low_half, high_half) = rows.split_at_mut(half_bytes);
     fused_forward_with::<F, B>(low_half, high_half, factor);
-    if dimension > 1 {
-        forward_bytes_node::<F, B>(low_half, factors, node * 2, dimension - 1);
-        forward_bytes_node::<F, B>(high_half, factors, node * 2 + 1, dimension - 1);
-    }
+    forward_bytes_node::<F, B>(low_half, factors, node * 2, dimension - 1);
+    forward_bytes_node::<F, B>(high_half, factors, node * 2 + 1, dimension - 1);
 }
 
 fn inverse_bytes_node<F: ButterflyKernels, B: ButterflyBackend<F>>(
@@ -846,12 +1187,14 @@ fn inverse_bytes_node<F: ButterflyKernels, B: ButterflyBackend<F>>(
     node: usize,
     dimension: usize,
 ) {
+    if dimension <= BASE_DIMENSION {
+        inverse_bytes_base::<F, B>(rows, factors, node, dimension);
+        return;
+    }
     let half_bytes = rows.len() / 2;
     let (low_half, high_half) = rows.split_at_mut(half_bytes);
-    if dimension > 1 {
-        inverse_bytes_node::<F, B>(low_half, factors, node * 2, dimension - 1);
-        inverse_bytes_node::<F, B>(high_half, factors, node * 2 + 1, dimension - 1);
-    }
+    inverse_bytes_node::<F, B>(low_half, factors, node * 2, dimension - 1);
+    inverse_bytes_node::<F, B>(high_half, factors, node * 2 + 1, dimension - 1);
     let factor = factors[node];
     fused_inverse_with::<F, B>(low_half, high_half, factor);
 }
@@ -1347,6 +1690,187 @@ mod tests {
         }
         check::<Gf8B>(&mut 31);
         check::<Gf16>(&mut 37);
+    }
+
+    #[test]
+    fn byte_derivative_paths_match_monomial_differentiation() {
+        fn check<F: ButterflyKernels>(state: &mut u32, row_len: usize) {
+            let size = 8;
+            let plan = TransformPlan::<F>::new(size).unwrap();
+            let coefficients = random_elements::<F>(state, size);
+
+            let mut monomial = coefficients.clone();
+            crate::basis::novel_to_monomial(&mut monomial, &plan).unwrap();
+            let mut expected = vec![F::Elem::ZERO; size];
+            for degree in (1..size).step_by(2) {
+                expected[degree - 1] = monomial[degree];
+            }
+            crate::basis::monomial_to_novel(&mut expected, &plan).unwrap();
+
+            let mut coefficient_rows = vec![0u8; size * row_len];
+            for (row, &coefficient) in coefficient_rows
+                .chunks_exact_mut(row_len)
+                .zip(&coefficients)
+            {
+                for element in row.chunks_mut(F::BYTES) {
+                    F::write(element, coefficient);
+                }
+            }
+
+            let mut derivative_rows = vec![0xA5; coefficient_rows.len()];
+            plan.derivative_bytes(&coefficient_rows, row_len, &mut derivative_rows)
+                .unwrap();
+            let mut augmented_rows = coefficient_rows.clone();
+            plan.derivative_plus_identity_bytes(&mut augmented_rows, row_len)
+                .unwrap();
+
+            for row in 0..size {
+                let expected_derivative = expected[row];
+                let expected_augmented = coefficients[row].add(expected_derivative);
+                for element in derivative_rows[row * row_len..][..row_len].chunks(F::BYTES) {
+                    assert_eq!(F::read(element), expected_derivative);
+                }
+                for element in augmented_rows[row * row_len..][..row_len].chunks(F::BYTES) {
+                    assert_eq!(F::read(element), expected_augmented);
+                }
+            }
+        }
+
+        // Exercise overwrite-first with nontrivial factors on every measured
+        // backend, and GFNI gather at its wide-row crossover.
+        check::<Gf8B>(&mut 101, DERIVATIVE_OVERWRITE_ROW_MIN);
+        check::<Gf16>(&mut 103, DERIVATIVE_OVERWRITE_ROW_MIN);
+        check::<Gf16>(&mut 107, DERIVATIVE_GATHER_ROW_MIN);
+    }
+
+    /// The byte-derivative sweep must match the straightforward
+    /// one-direction-at-a-time schedule (kept here as an independent oracle),
+    /// over both the default basis (generic scaled steps) and the Cantor
+    /// basis (trivial factors, plain-XOR steps), for even and odd dimension
+    /// counts, several row lengths, and arbitrary prior destination contents.
+    #[test]
+    fn derivative_bytes_sweep_matches_per_direction_schedule() {
+        fn reference<F: ButterflyKernels>(
+            plan: &TransformPlan<F>,
+            coefficients: &[u8],
+            row_len: usize,
+            derivative: &mut [u8],
+        ) {
+            derivative.fill(0);
+            for (bit, factor) in plan.prepared_derivative_factors.iter().enumerate() {
+                let half_len = (1 << bit) * row_len;
+                let block_len = half_len * 2;
+                for (source_block, destination_block) in coefficients
+                    .chunks_exact(block_len)
+                    .zip(derivative.chunks_exact_mut(block_len))
+                {
+                    ops::mul_add_with::<F>(
+                        &mut destination_block[..half_len],
+                        factor,
+                        &source_block[half_len..],
+                    );
+                }
+            }
+        }
+        fn check_plan<F: ButterflyKernels>(
+            state: &mut u32,
+            label: &str,
+            plan_for: impl Fn(usize) -> TransformPlan<F>,
+        ) {
+            for log_size in 0..=usize::min(9, F::BITS as usize) {
+                let size = 1 << log_size;
+                let plan = plan_for(size);
+                for lane_count in [1usize, 3, 7] {
+                    let row_len = lane_count * F::BYTES;
+                    let coefficients: Vec<u8> = (0..size * row_len)
+                        .map(|_| lcg(state).to_le_bytes()[1])
+                        .collect();
+                    // Garbage-prefilled destinations catch missing
+                    // initialization; a zeroed one catches double adds.
+                    for preset in [0xA5u8, 0x00] {
+                        let mut actual = vec![preset; size * row_len];
+                        plan.derivative_bytes(&coefficients, row_len, &mut actual)
+                            .unwrap();
+                        let mut expected = vec![preset; size * row_len];
+                        reference(&plan, &coefficients, row_len, &mut expected);
+                        assert_eq!(
+                            actual, expected,
+                            "{label} derivative diverged at log {log_size} lanes {lane_count} preset {preset:#x}"
+                        );
+
+                        let mut augmented = coefficients.clone();
+                        plan.derivative_plus_identity_bytes(&mut augmented, row_len)
+                            .unwrap();
+                        let expected_augmented: Vec<u8> = coefficients
+                            .iter()
+                            .zip(&expected)
+                            .map(|(&coefficient, &derivative)| coefficient ^ derivative)
+                            .collect();
+                        assert_eq!(
+                            augmented, expected_augmented,
+                            "{label} augmented derivative diverged at log {log_size} lanes {lane_count} preset {preset:#x}"
+                        );
+                    }
+                }
+            }
+        }
+        fn check<F: ButterflyKernels>(state: &mut u32)
+        where
+            <F as fgf::Field>::Elem: Send + Sync,
+        {
+            check_plan(state, "bit", |size| TransformPlan::<F>::new(size).unwrap());
+            #[cfg(feature = "std")]
+            check_plan(state, "cantor", |size| {
+                let basis = crate::basis::cantor_basis::<F>().unwrap();
+                let log = size.ilog2() as usize;
+                TransformPlan::<F>::with_basis(size, &basis.elements()[..log]).unwrap()
+            });
+        }
+        check::<Gf8B>(&mut 41);
+        check::<Gf16>(&mut 43);
+    }
+
+    #[cfg(feature = "internals")]
+    #[test]
+    fn derivative_production_crossovers_match_cantor_oracle() {
+        fn check<F: ButterflyKernels>()
+        where
+            <F as Field>::Elem: Send + Sync,
+        {
+            let size = 8;
+            let basis = crate::basis::cantor_basis::<F>().unwrap();
+            let plan =
+                TransformPlan::<F>::with_basis(size, &basis.elements()[..size.ilog2() as usize])
+                    .unwrap();
+            for row_len in [DERIVATIVE_OVERWRITE_ROW_MIN, DERIVATIVE_GATHER_ROW_MIN] {
+                let coefficients: Vec<u8> = (0..size * row_len)
+                    .map(|index| index.to_le_bytes()[0].wrapping_mul(73).wrapping_add(19))
+                    .collect();
+                let mut expected = vec![0u8; coefficients.len()];
+                for source in 1..size {
+                    let mut bits = source;
+                    while bits != 0 {
+                        let bit = bits.trailing_zeros() as usize;
+                        let destination = source ^ (1 << bit);
+                        let source_start = source * row_len;
+                        let destination_start = destination * row_len;
+                        for offset in 0..row_len {
+                            expected[destination_start + offset] ^=
+                                coefficients[source_start + offset];
+                        }
+                        bits &= bits - 1;
+                    }
+                }
+
+                let mut actual = vec![0xA5; coefficients.len()];
+                plan.derivative_bytes(&coefficients, row_len, &mut actual)
+                    .unwrap();
+                assert_eq!(actual, expected, "{} row length {row_len}", F::NAME);
+            }
+        }
+
+        check::<Gf8B>();
+        check::<Gf16>();
     }
 
     #[test]

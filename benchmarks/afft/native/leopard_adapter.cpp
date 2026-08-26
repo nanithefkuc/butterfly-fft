@@ -45,4 +45,20 @@ extern "C" void butterfly_fft_leopard_derivative(void** rows, unsigned points, u
     }
 }
 
+extern "C" void butterfly_fft_leopard_derivative_exact(
+    void** output,
+    void* const* coefficients,
+    unsigned points,
+    uint64_t row_len)
+{
+    for (unsigned i = 0; i < points; ++i)
+        memcpy(output[i], coefficients[i], row_len);
+
+    butterfly_fft_leopard_derivative(output, points, row_len);
+
+    // Leopard's in-place sweep computes c + D(c). Remove c to produce the
+    // exact out-of-place derivative contract benchmarked by butterfly-fft.
+    VectorXOR(row_len, points, output, const_cast<void**>(coefficients));
+}
+
 }} // namespace leopard::ff16
