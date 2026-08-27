@@ -29,7 +29,7 @@ internals = []
 # the two resolve the same `SIMD_BACKEND` (both re-export simdispatch's
 # ladder). Swap these revs with the dependents in the same sitting.
 simdispatch = { git = "https://github.com/nanithefkuc/simdispatch", rev = "5940194107384953cd8cd9f45c8d902b26d5686e" }
-fgf = { git = "https://github.com/nanithefkuc/fgf", rev = "f9c25a898b96627d71d3b9b35a1bd4b6dc15b247" }
+fgf = { git = "https://github.com/nanithefkuc/fgf", rev = "d5a1fa5f4cf39e666725f0089674093203aeba45" }
 
 [package.metadata.docs.rs]
 all-features = true
