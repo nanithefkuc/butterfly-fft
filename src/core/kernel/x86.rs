@@ -44,8 +44,8 @@ fn scale_table(coefficient: gf8b::Elem) -> ScaleTable {
     let mut low = [0; 32];
     let mut high = [0; 32];
     for nibble in 0..16u8 {
-        low[nibble as usize] = gf8b::Elem(nibble).mul(coefficient).0;
-        high[nibble as usize] = gf8b::Elem(nibble << 4).mul(coefficient).0;
+        low[nibble as usize] = gf8b::Elem::from_raw(nibble).mul(coefficient).to_raw();
+        high[nibble as usize] = gf8b::Elem::from_raw(nibble << 4).mul(coefficient).to_raw();
     }
     for nibble in 0..16 {
         low[16 + nibble] = low[nibble];
@@ -60,8 +60,8 @@ fn scale_table(coefficient: gf8b::Elem) -> ScaleTable {
 fn factor_words(coefficient: gf16::Elem) -> (i16, i16) {
     let (c0, c1) = coefficient.components();
     let delta_c1 = gf16::DELTA.mul(c1);
-    let same = i16::from_le_bytes([c0.0, c0.add(c1).0]);
-    let cross = i16::from_le_bytes([delta_c1.0, c1.0]);
+    let same = i16::from_le_bytes([c0.to_raw(), c0.add(c1).to_raw()]);
+    let cross = i16::from_le_bytes([delta_c1.to_raw(), c1.to_raw()]);
     (same, cross)
 }
 
@@ -186,7 +186,7 @@ pub(super) unsafe fn gf8_fused_forward_gfni(
     high: &mut [u8],
     coefficient: gf8b::Elem,
 ) {
-    let coeff = _mm256_set1_epi8(coefficient.0.cast_signed());
+    let coeff = _mm256_set1_epi8(coefficient.to_raw().cast_signed());
     let vector_len = low.len() / 32 * 32;
     let mut offset = 0;
     while offset < vector_len {
@@ -216,7 +216,7 @@ pub(super) unsafe fn gf8_fused_inverse_gfni(
     high: &mut [u8],
     coefficient: gf8b::Elem,
 ) {
-    let coeff = _mm256_set1_epi8(coefficient.0.cast_signed());
+    let coeff = _mm256_set1_epi8(coefficient.to_raw().cast_signed());
     let vector_len = low.len() / 32 * 32;
     let mut offset = 0;
     while offset < vector_len {

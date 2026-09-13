@@ -16,6 +16,8 @@
 //! - [`basis`] — ordered field bases (bit, Cantor) and monomial ↔ novel
 //!   coefficient-basis conversion.
 //! - [`shifted`] — transforms over affine cosets `α + V`.
+//! - [`ntt`] — multiplicative (number-theoretic) transforms over fields
+//!   whose multiplicative group has a large power-of-two factor.
 //!
 //! ## Features
 //!
@@ -52,4 +54,5 @@ pub mod core;
 pub mod error;
 #[cfg(feature = "internals")]
 pub mod internals;
+pub mod ntt;
 pub mod shifted;

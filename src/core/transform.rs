@@ -12,10 +12,10 @@
 //!
 //! let plan = TransformPlan::<Gf16>::new(4).unwrap();
 //! let mut values = [
-//!     gf16::Elem(0x1234),
-//!     gf16::Elem(0xabcd),
-//!     gf16::Elem(0x0108),
-//!     gf16::Elem(0xffff),
+//!     gf16::Elem::from_raw(0x1234),
+//!     gf16::Elem::from_raw(0xabcd),
+//!     gf16::Elem::from_raw(0x0108),
+//!     gf16::Elem::from_raw(0xffff),
 //! ];
 //! let original = values;
 //! plan.forward(&mut values).unwrap();

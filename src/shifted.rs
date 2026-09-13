@@ -28,7 +28,7 @@
 //! use fgf::{Gf16, field::Elem, gf16};
 //!
 //! // Evaluate over the coset α + span{β_0, β_1}.
-//! let shift = gf16::Elem(0x2ba7);
+//! let shift = gf16::Elem::from_raw(0x2ba7);
 //! let plan = ShiftedPlan::<Gf16>::new(4, shift).unwrap();
 //! assert_eq!(plan.point_element(0), shift);
 //! assert_eq!(

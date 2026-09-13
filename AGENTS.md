@@ -57,6 +57,28 @@ stack-wide downgrade-only `SIMD_BACKEND` override. `core::kernel::BUTTERFLY_FFT_
 contains the tiers implemented by this crate. Do not add a crate-local CPU
 probe or environment override.
 
+## Tooling
+
+`just validate` is the pull-request gate; the shared recipe surface is
+documented once in the umbrella's root `AGENTS.md`. Crate specifics:
+
+- **`TIERS = v3_gfni_crypto v3 v2 scalar`**, matching the tiers
+  `core::kernel::BUTTERFLY_FFT_TIERS` declares. Dispatch resolves one backend
+  per process, so `just test-tiers` and `just cover` re-run the suite once per
+  tier; a single host run only ever exercises the strongest.
+- **`MIRI = --no-default-features`.** The `no_std` + `alloc` closure is what
+  miri can execute, and the run covers the safe wrappers over
+  `src/core/kernel` — walker geometry, scratch sizing, and the checked byte-row
+  arithmetic of hard rule 2. Intrinsics remain the job of the differential
+  kernel tests.
+- **`COV_IGNORE` is empty**: every line counts toward the 95% gate.
+- **Bench target:** `ntt` — `just bench-save ntt`, then `just bench ntt`. The
+  excluded `benchmarks/afft` project is not a cargo bench target and is not
+  reachable from these recipes.
+- `justfile` is a byte-identical vendored copy; never edit it here or the
+  umbrella's `just drift` check fails. Crate-specific values and recipes belong
+  in `crate.just`.
+
 ## Testing
 
 A bug fix includes a regression that fails for the observed bug. Tests assert

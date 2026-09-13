@@ -106,6 +106,7 @@ values.
 | `core::kernel` | fused butterfly kernels and runtime SIMD dispatch |
 | `basis` | [`BitBasis`], [`CantorBasis`], [`CoordinateMap`], and monomial/novel conversion |
 | `shifted` | [`ShiftedPlan`] execution over affine cosets `α + V` |
+| `ntt` | `NttPlan` radix-two multiplicative (number-theoretic) transforms over prime and prime-extension fields |
 
 ## Building
 

@@ -24,12 +24,19 @@ simd = ["std", "fgf/simd"]
 internals = []
 
 [dependencies]
-# Level 0 single source for SIMD capability selection; pinned to the
-# `v0.0.0` tag. `fgf` is pinned to the canonical field-crate revision so
-# the two resolve the same `SIMD_BACKEND` (both re-export simdispatch's
-# ladder). Swap these revs with the dependents in the same sitting.
-simdispatch = { git = "https://github.com/nanithefkuc/simdispatch", rev = "5940194107384953cd8cd9f45c8d902b26d5686e" }
-fgf = { git = "https://github.com/nanithefkuc/fgf", rev = "d5a1fa5f4cf39e666725f0089674093203aeba45" }
+# Level 0 single source for SIMD capability selection, taken from the
+# registry at the exact release `fgf` resolves, so both crates compile one
+# `simdispatch` and share its `Backend` type and `SIMD_BACKEND` ladder. `fgf`
+# is pinned by rev; swap it with the dependents in the same sitting.
+simdispatch = { version = "=0.1.0", default-features = false }
+fgf = { git = "https://github.com/nanithefkuc/fgf", rev = "b33b441bcff60da80354bfee6050db4aeab6295c", default-features = false }
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "ntt"
+harness = false
 
 [package.metadata.docs.rs]
 all-features = true
@@ -38,3 +45,11 @@ rustdoc-args = ["--cfg", "docsrs"]
 [profile.bench]
 lto = "thin"
 codegen-units = 1
+
+# Release codegen a profiler can attribute: opt-level 3 with full debug info
+# and no symbol stripping. Frame pointers come from RUSTFLAGS in `just
+# profile-perf`, since they are not a Cargo profile key.
+[profile.profiling]
+inherits = "release"
+debug = "full"
+strip = "none"

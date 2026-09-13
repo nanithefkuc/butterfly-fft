@@ -16,6 +16,14 @@ releases follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `ntt` module: a second transform family over the same object, a radix-two
+  Cooley-Tukey multiplicative (number-theoretic) transform. `NttPlan`
+  precomputes the root of unity, bit-reversal permutation, both twiddle
+  directions, and the `n^-1` scale, so `forward_bytes`/`inverse_bytes` run
+  over packed byte rows with no allocation and no coefficient preparation.
+  Goldilocks and `QuadMersenne31` admit sizes to `2^20`; base `Mersenne31`
+  admits only size 2 and the binary fields only the identity, all decided by
+  the `size | |F| - 1` rule rather than a field special case.
 - `TransformPlan::vanishing_polynomial` returns the dense monomial
   coefficients of the domain vanishing polynomial `G(X)` for both subspace and
   affine-coset domains, and `TransformPlan::shift` exposes the coset shift.
@@ -32,6 +40,10 @@ releases follow [Semantic Versioning](https://semver.org/).
   library identifier, repository URL, and dependent feature paths.
 - Replaced the former `fff` field dependency with `fgf`, preserving transform,
   basis-conversion, dispatch, and allocation behavior.
+- Took up fgf's tightened field-element encapsulation: the x86 butterfly
+  kernels and the kernel unit tests construct and read `gf8b`/`gf16`
+  elements through `Elem::from_raw`/`Elem::to_raw` instead of the tuple
+  field, which fgf narrowed to crate visibility. No behavior change.
 - `TransformPlan::derivative_bytes` selects measured source-sweep,
   overwrite-first, and destination-gather schedules by row geometry and
   backend. Wide-row Cantor derivatives improved by up to 36%, while short rows

@@ -14,7 +14,7 @@ cc = "1"
 butterfly-fft = { path = "../..", features = ["internals"] }
 additive-fft-reed-solomon = { git = "https://github.com/vkomenda/additive-fft-reed-solomon", rev = "f1bcc91102b74f860c93dcf0b75887ff85755564", features = ["compile_gfni"] }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
-fgf = { git = "https://github.com/nanithefkuc/fgf", rev = "f9c25a898b96627d71d3b9b35a1bd4b6dc15b247" }
+fgf = { git = "https://github.com/nanithefkuc/fgf", rev = "d5a1fa5f4cf39e666725f0089674093203aeba45" }
 
 [[bench]]
 name = "raw_afft"

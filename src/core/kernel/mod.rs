@@ -701,30 +701,30 @@ mod tests {
 
     #[test]
     fn scalar_roundtrip_gf8() {
-        let coefficients = [0x00, 0x01, 0x02, 0x03, 0x53, 0xff].map(fgf::gf8b::Elem);
+        let coefficients = [0x00, 0x01, 0x02, 0x03, 0x53, 0xff].map(fgf::gf8b::Elem::from_raw);
         scalar_roundtrip::<Gf8B>(&coefficients);
     }
 
     #[test]
     fn scalar_roundtrip_gf16() {
-        let coefficients = [0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fgf::gf16::Elem);
+        let coefficients = [0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fgf::gf16::Elem::from_raw);
         scalar_roundtrip::<Gf16>(&coefficients);
     }
 
     #[test]
     fn scalar_forward_matches_element_math_gf8() {
-        for coefficient in [0x00, 0x01, 0x03, 0xff].map(fgf::gf8b::Elem) {
+        for coefficient in [0x00, 0x01, 0x03, 0xff].map(fgf::gf8b::Elem::from_raw) {
             for len in lengths(1) {
                 let low = pattern(0x3d, len);
                 let high = pattern(0xc2, len);
                 let mut expected_low = low.clone();
                 let mut expected_high = high.clone();
                 for (l, h) in expected_low.iter_mut().zip(&mut expected_high) {
-                    let lo = fgf::gf8b::Elem(*l);
-                    let hi = fgf::gf8b::Elem(*h);
+                    let lo = fgf::gf8b::Elem::from_raw(*l);
+                    let hi = fgf::gf8b::Elem::from_raw(*h);
                     let new_low = lo.add(coefficient.mul(hi));
-                    *l = new_low.0;
-                    *h = hi.add(new_low).0;
+                    *l = new_low.to_raw();
+                    *h = hi.add(new_low).to_raw();
                 }
                 let (mut low, mut high) = (low, high);
                 scalar::fused_forward::<Gf8B>(&mut low, &mut high, coefficient);
@@ -736,7 +736,7 @@ mod tests {
 
     #[test]
     fn scalar_forward_matches_element_math_gf16() {
-        for coefficient in [0x0000, 0x0001, 0x0108, 0xbeef].map(fgf::gf16::Elem) {
+        for coefficient in [0x0000, 0x0001, 0x0108, 0xbeef].map(fgf::gf16::Elem::from_raw) {
             for len in lengths(2) {
                 let low = pattern(0x3d, len);
                 let high = pattern(0xc2, len);
@@ -777,8 +777,8 @@ mod tests {
                 }
             }
         }
-        check::<Gf8B>(&[0x00, 0x01, 0x53, 0xff].map(fgf::gf8b::Elem));
-        check::<Gf16>(&[0x0000, 0x0001, 0x0108, 0x9b37].map(fgf::gf16::Elem));
+        check::<Gf8B>(&[0x00, 0x01, 0x53, 0xff].map(fgf::gf8b::Elem::from_raw));
+        check::<Gf16>(&[0x0000, 0x0001, 0x0108, 0x9b37].map(fgf::gf16::Elem::from_raw));
     }
 
     #[test]
@@ -858,12 +858,12 @@ mod tests {
                 assert_eq!(dst, expected);
             }
         }
-        check::<Gf8B>(fgf::gf8b::Elem(0x53));
-        check::<Gf8B>(fgf::gf8b::Elem(0x00));
-        check::<Gf8B>(fgf::gf8b::Elem(0x01));
-        check::<Gf16>(fgf::gf16::Elem(0x9b37));
-        check::<Gf16>(fgf::gf16::Elem(0x0000));
-        check::<Gf16>(fgf::gf16::Elem(0x0001));
+        check::<Gf8B>(fgf::gf8b::Elem::from_raw(0x53));
+        check::<Gf8B>(fgf::gf8b::Elem::from_raw(0x00));
+        check::<Gf8B>(fgf::gf8b::Elem::from_raw(0x01));
+        check::<Gf16>(fgf::gf16::Elem::from_raw(0x9b37));
+        check::<Gf16>(fgf::gf16::Elem::from_raw(0x0000));
+        check::<Gf16>(fgf::gf16::Elem::from_raw(0x0001));
     }
 
     #[test]
@@ -887,8 +887,8 @@ mod tests {
             assert_eq!(destinations, expected);
         }
 
-        check::<Gf8B>(&[0x00, 0x01, 0x53, 0xff].map(fgf::gf8b::Elem));
-        check::<Gf16>(&[0x0000, 0x0001, 0x9b37, 0xffff].map(fgf::gf16::Elem));
+        check::<Gf8B>(&[0x00, 0x01, 0x53, 0xff].map(fgf::gf8b::Elem::from_raw));
+        check::<Gf16>(&[0x0000, 0x0001, 0x9b37, 0xffff].map(fgf::gf16::Elem::from_raw));
     }
 
     /// Compare one concrete SIMD backend against the scalar reference in
@@ -956,8 +956,10 @@ mod tests {
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     #[test]
     fn x86_backends_match_scalar_in_both_directions() {
-        differential_x86::<Gf8B>(&[0x00, 0x01, 0x02, 0x53, 0xff].map(fgf::gf8b::Elem));
-        differential_x86::<Gf16>(&[0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fgf::gf16::Elem));
+        differential_x86::<Gf8B>(&[0x00, 0x01, 0x02, 0x53, 0xff].map(fgf::gf8b::Elem::from_raw));
+        differential_x86::<Gf16>(
+            &[0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fgf::gf16::Elem::from_raw),
+        );
     }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -965,11 +967,11 @@ mod tests {
     fn neon_backends_match_scalar_in_both_directions() {
         differential_backend::<Gf8B, NeonBackend<Gf8B>>(
             "neon",
-            &[0x00, 0x01, 0x02, 0x53, 0xff].map(fgf::gf8b::Elem),
+            &[0x00, 0x01, 0x02, 0x53, 0xff].map(fgf::gf8b::Elem::from_raw),
         );
         differential_backend::<Gf16, NeonBackend<Gf16>>(
             "neon",
-            &[0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fgf::gf16::Elem),
+            &[0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fgf::gf16::Elem::from_raw),
         );
     }
 }
