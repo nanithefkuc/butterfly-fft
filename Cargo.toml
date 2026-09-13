@@ -29,7 +29,7 @@ internals = []
 # `simdispatch` and share its `Backend` type and `SIMD_BACKEND` ladder. `fgf`
 # is pinned by rev; swap it with the dependents in the same sitting.
 simdispatch = { version = "=0.1.0", default-features = false }
-fgf = { git = "https://github.com/nanithefkuc/fgf", rev = "b33b441bcff60da80354bfee6050db4aeab6295c", default-features = false }
+fgf = { git = "https://github.com/nanithefkuc/fgf", rev = "68cae1fa058e1900e24b9eb564efeb0189ad0f78", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
