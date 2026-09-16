@@ -2,3 +2,5 @@
 /benchmarks/afft/target
 /benchmarks/afft/.upstream
 .plans/
+/.sheaf/
+/.lucid/

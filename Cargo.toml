@@ -28,7 +28,7 @@ internals = []
 # registry at the exact release `fgf` resolves, so both crates compile one
 # `simdispatch` and share its `Backend` type and `SIMD_BACKEND` ladder.
 simdispatch = { version = "=0.1.0", default-features = false }
-fgf = { version = "=1.0.0", default-features = false }
+fgf = { version = "=1.1.0", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

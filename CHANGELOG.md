@@ -15,15 +15,21 @@ releases follow [Semantic Versioning](https://semver.org/).
 
 ### Changed (NTT execution schedule)
 
-- `NttPlan` butterfly stages select between two measured schedules: a fused
-  register form that computes each element pair's updates directly with no
-  scratch row and no whole-row copy, and the previous packed op-call form.
-  Fields without vector elementwise kernels run the fused form at every row
-  width; vectorized fields run it for single-element rows, where the
-  interleaved campaign shows it ahead at every measured size, and keep wide
-  rows on the packed kernels. Both schedules stay reachable through
-  `internals::ntt_forward_fused` and `internals::ntt_forward_packed`, and
-  the crossover record lives in `BENCHMARKS.md`.
+- `NttPlan` butterfly stages select among three measured schedules: the
+  fused register form (fields without vector elementwise kernels, every
+  row width), a batched region form — one elementwise twiddle multiply,
+  one region copy, one region subtract and add per bounded batch instead
+  of four op calls per pair — and the packed op-call form at and above
+  128-byte rows, where its broadcast multiply reads no twiddle stream and
+  wins. The pinned fgf moves to 1.1.0, whose QuadMersenne31 vector
+  kernels and Goldilocks correctness fix the wide-row paths ride. All
+  three schedules stay reachable through `internals::ntt_forward_fused`,
+  `internals::ntt_forward_batched`, and `internals::ntt_forward_packed`,
+  and the campaign record, including a measured rejection of a four-step
+  cache-blocked decomposition, lives in `BENCHMARKS.md`. `NttScratch`
+  grows the batched schedule's two bounded region buffers, and scratch
+  reused across plans of different sizes is rejected with
+  `NttError::ScratchTooSmall` before anything is written.
 
 ### Changed (naming and layout, fgf alignment)
 

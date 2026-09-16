@@ -125,3 +125,47 @@ pub fn ntt_forward_packed<F: FieldKernels>(
 ) -> Result<(), NttError> {
     plan.forward_packed(rows, row_len, scratch)
 }
+
+/// Tuning-only forward NTT forced through the batched region-pass
+/// butterflies.
+///
+/// This exposes the alternative execution schedule for benchmark crossover
+/// measurements. It has the same output and geometry contract as
+/// [`NttPlan::forward_bytes_scratch`] and allocates nothing, except that
+/// the scratch must carry batch regions the plan's widest stage fills.
+///
+/// # Errors
+/// As [`NttPlan::forward_bytes_scratch`].
+// Reachable only through the `internals` facade.
+#[allow(dead_code)]
+pub fn ntt_forward_batched<F: FieldKernels>(
+    plan: &NttPlan<F>,
+    rows: &mut [u8],
+    row_len: usize,
+    scratch: &mut NttScratch,
+) -> Result<(), NttError> {
+    plan.forward_batched(rows, row_len, scratch)
+}
+
+/// Tuning-only forward NTT forced through the cache-blocked four-step
+/// decomposition.
+///
+/// This exposes the alternative execution schedule for benchmark crossover
+/// measurements. It has the same output and geometry contract as
+/// [`NttPlan::forward_bytes_scratch`] and allocates nothing, except that
+/// the scratch must carry transpose flags the plan's size fills — any
+/// scratch this plan builds does; below the activation size the entry
+/// runs the production schedule.
+///
+/// # Errors
+/// As [`NttPlan::forward_bytes_scratch`].
+// Reachable only through the `internals` facade.
+#[allow(dead_code)]
+pub fn ntt_forward_fourstep<F: FieldKernels>(
+    plan: &NttPlan<F>,
+    rows: &mut [u8],
+    row_len: usize,
+    scratch: &mut NttScratch,
+) -> Result<(), NttError> {
+    plan.forward_fourstep(rows, row_len, scratch)
+}

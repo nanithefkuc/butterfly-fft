@@ -1,8 +1,9 @@
 //! NTT butterfly-schedule crossover: fused register butterflies against the
-//! packed op-call control, forced past production selection through the
-//! `internals` facade.
+//! packed op-call control, the batched region-pass candidate, and the
+//! cache-blocked four-step candidate, forced past production selection
+//! through the `internals` facade.
 //!
-//! Both arms validate byte-for-byte agreement at every geometry before
+//! Every arm validates byte-for-byte agreement at every geometry before
 //! anything is timed. Short targeted panels, as the crate's crossover
 
 // `as_chunks_mut::<F::BYTES>()` needs a const generic argument depending on
@@ -11,7 +12,9 @@
 
 use std::hint::black_box;
 
-use butterfly_fft::internals::{ntt_forward_fused, ntt_forward_packed};
+use butterfly_fft::internals::{
+    ntt_forward_batched, ntt_forward_fourstep, ntt_forward_fused, ntt_forward_packed,
+};
 use butterfly_fft::ntt::{NttPlan, NttScratch};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use fgf::field::{Elem, Field};
@@ -21,7 +24,10 @@ use fgf::{Goldilocks, QuadMersenne31};
 /// Full-product sizes spanning the cache hierarchy.
 const SIZES: [usize; 6] = [64, 256, 1024, 4096, 16384, 65536];
 /// Independent transform lanes packed into one row.
-const LANES: [usize; 3] = [1, 4, 16];
+const LANES: [usize; 5] = [1, 2, 4, 8, 16];
+/// Smallest size the four-step arm benches, mirroring the crate's
+/// activation threshold for the decomposition.
+const FOURSTEP_MIN_SIZE: usize = 1024;
 
 /// Fixed-seed LCG, reduced into the field by the canonicalizing read.
 fn fill<F: Field>(bytes: &mut [u8], seed: u64) {
@@ -44,30 +50,53 @@ fn schedules<F: FieldKernels>(criterion: &mut Criterion) {
 
             let mut fused = vec![0u8; size * row_len];
             fill::<F>(&mut fused, 0x1234_5678_9abc_def1);
-            // The packed control rides released fgf's Goldilocks kernels,
-            // which the recorded correctness finding marks
-            // nondeterministically wrong from 256 elements up on GFNI
-            // hosts, so cross-schedule agreement cannot gate the timing,
-            // and neither can a round trip whose production inverse runs
-            // the same defective kernels. Where the production path is
-            // fully fused the exact round trip gates the fused arm; at the
-            // packed-defect geometries the fused arm's correctness is the
-            // unit-test direct-DFT differential, and both timing arms are
-            // timing-only, as in the recorded competitor table.
-            if !F::has_vector_elementwise() || row_len <= 8 {
-                let mut roundtrip = fused.clone();
-                ntt_forward_fused(&plan, &mut roundtrip, row_len, &mut scratch).expect("geometry");
-                plan.inverse_bytes_scratch(&mut roundtrip, row_len, &mut scratch)
-                    .expect("inverse");
-                assert_eq!(
-                    roundtrip,
-                    fused,
-                    "{} p{size}_l{lanes} fused round trip diverged",
-                    F::NAME
-                );
-            }
+            // Every geometry is gated on an exact round trip: the fixed
+            // fgf kernels make the packed and batched arms and the
+            // production inverse exact at every width, so cross-schedule
+            // agreement and the round trip can gate the timing
+            // everywhere. Both alternative arms must also match the
+            // fused arm byte for byte.
+            let mut packed_probe = fused.clone();
+            ntt_forward_packed(&plan, &mut packed_probe, row_len, &mut scratch).expect("geometry");
+            let mut fused_probe = fused.clone();
+            ntt_forward_fused(&plan, &mut fused_probe, row_len, &mut scratch).expect("geometry");
+            assert_eq!(
+                packed_probe,
+                fused_probe,
+                "{} p{size}_l{lanes} packed diverged from fused",
+                F::NAME
+            );
+            let mut batched_probe = fused.clone();
+            ntt_forward_batched(&plan, &mut batched_probe, row_len, &mut scratch)
+                .expect("geometry");
+            assert_eq!(
+                batched_probe,
+                fused_probe,
+                "{} p{size}_l{lanes} batched diverged from fused",
+                F::NAME
+            );
+            let mut fourstep_probe = fused.clone();
+            ntt_forward_fourstep(&plan, &mut fourstep_probe, row_len, &mut scratch)
+                .expect("geometry");
+            assert_eq!(
+                fourstep_probe,
+                fused_probe,
+                "{} p{size}_l{lanes} fourstep diverged from fused",
+                F::NAME
+            );
+            let mut roundtrip = fused_probe.clone();
+            plan.inverse_bytes_scratch(&mut roundtrip, row_len, &mut scratch)
+                .expect("inverse");
+            assert_eq!(
+                roundtrip,
+                fused,
+                "{} p{size}_l{lanes} inverse(forward(x)) diverged",
+                F::NAME
+            );
             let mut packed = fused.clone();
             ntt_forward_packed(&plan, &mut packed, row_len, &mut scratch).expect("geometry");
+            let mut batched = fused.clone();
+            ntt_forward_batched(&plan, &mut batched, row_len, &mut scratch).expect("geometry");
 
             let case = format!("p{size}_l{lanes}");
             let mut group = criterion.benchmark_group(format!("ntt_tuning/{}", F::NAME));
@@ -95,6 +124,31 @@ fn schedules<F: FieldKernels>(criterion: &mut Criterion) {
                     .expect("validated geometry");
                 });
             });
+            group.bench_function(format!("batched/{case}"), |bencher| {
+                bencher.iter(|| {
+                    ntt_forward_batched(
+                        &plan,
+                        black_box(&mut batched),
+                        row_len,
+                        black_box(&mut scratch),
+                    )
+                    .expect("validated geometry");
+                });
+            });
+            if size >= FOURSTEP_MIN_SIZE {
+                let mut fourstep = fused.clone();
+                group.bench_function(format!("fourstep/{case}"), |bencher| {
+                    bencher.iter(|| {
+                        ntt_forward_fourstep(
+                            &plan,
+                            black_box(&mut fourstep),
+                            row_len,
+                            black_box(&mut scratch),
+                        )
+                        .expect("validated geometry");
+                    });
+                });
+            }
             group.finish();
         }
     }

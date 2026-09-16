@@ -51,98 +51,95 @@ execution numbers below are the steady-state contract.
 
 `NttPlan::scratch` costs 12.9–13.9 ns on both hosts and fields.
 
-### Fused butterfly schedule
+### Butterfly schedules
 
-`NttPlan` butterfly stages select between the fused register form — each
-element pair updated directly, no scratch row, no whole-row copy, one
-backend-independent walk per stage — and the packed op-call form it
-replaced, which survives behind `internals::ntt_forward_packed` as the
-callable control. The `ntt_tuning` bench interleaves both arms in one
-binary at every execution geometry; ratios below are control (packed)
-divided by fused, so above 1.00 the fused form wins.
+`NttPlan` butterfly stages select among three schedules, a pure function of
+the row geometry and the resolved backend. Fields without vector
+elementwise kernels run the fused register form — each pair updated
+directly, no scratch row, no whole-row copy. Fields with them run the
+batched region form below `BATCHED_ROW_MAX` (128 bytes): per block and
+bounded batch, one elementwise twiddle multiply into a region temporary,
+one region copy, one region subtract, one region add — the same arithmetic
+as the packed form with four dispatches per batch instead of per pair. At
+and above the bound the packed op-call form keeps the rows, where its
+broadcast multiply reads no twiddle stream and wins.
 
 ```sh
 FEC_GOLDEN_CORE=3 just _bench-run ntt_tuning
 ```
 
-Core Ultra 7 258V, Linux, rustc 1.98.0, backend `v3_gfni_crypto`, cells
-**Goldilocks / QuadMersenne31**:
+Core Ultra 7 258V, Linux, rustc 1.98.0, backend `v3_gfni_crypto`, on the
+`fgf` 1.1.0 kernels (the Goldilocks wrap defect fixed, QuadMersenne31
+vectorized). Every arm is validated byte-for-byte against the fused arm and
+an exact round trip before timing. Cells are **fused | packed | batched**
+milliseconds; the adopted schedule per row width is the minimum of packed
+and batched.
 
-| Size | lanes 1 | lanes 4 | lanes 16 |
-| ---: | ---: | ---: | ---: |
-| 64 | 2.18 / 1.74 | 0.54 / 1.20 | 0.27 / 1.16 |
-| 256 | 1.75 / 1.80 | 0.45 / 1.19 | 0.24 / 1.15 |
-| 1024 | 1.62 / 1.92 | 0.44 / 1.19 | 0.26 / 1.14 |
-| 4096 | 1.62 / 1.88 | 0.52 / 1.17 | 0.22 / 1.13 |
-| 16384 | 1.47 / 1.82 | 0.41 / 1.16 | 0.23 / 1.13 |
-| 65536 | 1.44 / 1.76 | 0.53 / 1.17 | 0.23 / 1.13 |
+| Size | field | l1 | l2 | l4 | l8 | l16 |
+| ---: | --- | --- | --- | --- | --- | --- |
+| 64 | GLD | .001\|.003\|.001 | .001\|.002\|.001 | .005\|.003\|.002 | .012\|.007\|.007 | .019\|.010\|.011 |
+| 1024 | GLD | .05\|.07\|.02 | .08\|.09\|.03 | .16\|.07\|.05 | .31\|.09\|.08 | .60\|.13\|.14 |
+| 65536 | GLD | 5.5\|7.7\|1.9 | 9.2\|9.5\|3.0 | 17.3\|7.0\|4.8 | 34.2\|10.5\|8.0 | 66.1\|15.0\|14.7 |
+| 64 | QM31 | .001\|.001\|.001 | .001\|.001\|.001 | .003\|.003\|.002 | .010\|.005\|.006 | .014\|.009\|.013 |
+| 1024 | QM31 | .03\|.06\|.02 | .05\|.07\|.03 | .09\|.09\|.05 | .17\|.08\|.09 | .34\|.13\|.16 |
+| 65536 | QM31 | 3.1\|6.1\|1.9 | 5.5\|7.1\|2.9 | 9.9\|9.6\|5.2 | 18.6\|8.7\|8.6 | 36.5\|14.4\|16.1 |
 
-The fused form dominates every QuadMersenne31 geometry — that field has no
-vector elementwise kernels, so the packed form's four op calls per pair
-bought nothing — and every Goldilocks single-lane geometry, where the
-packed form's 8-byte rows ran the scalar tails of the AVX2 kernels. At
-Goldilocks multi-element rows the packed kernels win decisively and keep
-the schedule. The shipped selector is therefore `!has_vector_elementwise()
-|| row_len <= FUSED_ROW_MAX` with `FUSED_ROW_MAX = 8` bytes: a pure
-function of the row geometry and the resolved backend. The two-element
-row (16 bytes) sits in the unmeasured gap between the winning ends and is
-routed conservatively to the packed form; moving it requires a fresh
-interleaved campaign.
+The batched form dominates the packed form below 128-byte rows at every
+measured size for both fields — including single-lane rows, where region
+passes over the vector kernels beat the fused form's per-element decode —
+while at 128 bytes and above the packed broadcast multiply wins. The
+128-byte boundary concedes at most the measured ten-percent margins on
+either side of it (Goldilocks eight-lane, QuadMersenne31 sixteen-lane small
+sizes); a per-field boundary would need a field fact fgf does not expose and
+the margin does not justify.
+
+#### Four-step rejection
+
+A cache-blocked four-step decomposition (Bailey's six-step shape: three
+in-place slot transposes around two half-size phases and a twiddle pass,
+`internals::ntt_forward_fourstep`) measured 1.10–2.60× slower than the
+adopted schedule at every geometry from 1024 points up, both fields, all
+lane widths. The cycle-following transposes spend six cache-hostile
+full-buffer passes, and the twiddle pass's elementwise multiply reads a
+twiddle stream beside the data where the adopted schedules broadcast.
+Correctness holds at every geometry, so the body stays behind `internals`
+for cross-host rerun. Revisit requires a blocked or recursive transpose and
+an in-place elementwise multiply; the arithmetic saving alone cannot
+recover the measured movement cost.
 
 ### Execution
 
 `forward_bytes_scratch` / `inverse_bytes_scratch` throughput in millions of
-field elements per second, cells **forward/inverse**. One complete pinned
-run on the fused-schedule tree; the schedule ratios above, not cross-run
-deltas, are the comparison that set the selector.
+field elements per second, cells **forward/inverse**, on the adopted
+three-way schedule over the `fgf` 1.1.0 kernels. One complete pinned run.
 
 **Goldilocks**
 
 | Size | lanes 1 | lanes 4 | lanes 16 |
 | ---: | ---: | ---: | ---: |
-| 64 | 56.4/53.7 | 105/83.4 | 208/188 |
-| 256 | 31.8/31.3 | 78.0/75.0 | 150/139 |
-| 1024 | 23.1/23.0 | 61.9/60.5 | 124/116 |
-| 4096 | 18.7/18.7 | 49.2/47.5 | 99.0/93.5 |
-| 16384 | 15.0/15.0 | 43.1/42.1 | 82.8/79.2 |
-| 65536 | 12.9/13.1 | 35.8/34.9 | 56.0/54.4 |
+| 64 | 59.7/56.9 | 104/96.7 | 195/184 |
+| 256 | 53.0/51.7 | 95.4/91.7 | 156/150 |
+| 1024 | 49.2/47.9 | 81.8/79.6 | 120/115 |
+| 4096 | 45.1/44.3 | 69.1/67.6 | 101/97.4 |
+| 16384 | 39.0/38.3 | 60.2/59.1 | 71.6/69.5 |
+| 65536 | 34.8/34.2 | 54.6/53.9 | 66.1/64.4 |
 
 **QuadMersenne31**
 
 | Size | lanes 1 | lanes 4 | lanes 16 |
 | ---: | ---: | ---: | ---: |
-| 64 | 52.2/47.1 | 62.3/55.0 | 66.9/59.2 |
-| 256 | 38.2/34.8 | 46.0/41.6 | 48.1/44.0 |
-| 1024 | 29.4/26.4 | 34.8/32.5 | 35.4/34.2 |
-| 4096 | 23.4/22.9 | 28.6/27.0 | 30.9/29.0 |
-| 16384 | 20.2/19.3 | 24.6/23.2 | 26.2/24.8 |
-| 65536 | 16.9/16.1 | 21.2/20.3 | 22.6/21.4 |
+| 64 | 57.1/52.9 | 100/93.4 | 211/198 |
+| 256 | 52.5/48.9 | 86.2/81.5 | 162/153 |
+| 1024 | 47.9/45.1 | 74.9/71.6 | 120/113 |
+| 4096 | 43.7/41.6 | 64.6/62.1 | 98.6/93.7 |
+| 16384 | 38.8/37.1 | 57.3/55.2 | 90.0/86.2 |
+| 65536 | 34.0/32.7 | 50.8/49.1 | 76.8/73.6 |
 
-Goldilocks scales with lane count because its wide rows ride the `fgf`
-packed kernels; QuadMersenne31's fused extension-field arithmetic
-saturates earlier. Both directions sit within a few percent of each other —
-the inverse differs only by the twiddle table and one final scaling pass.
-
-### Known correctness finding
-
-The Goldilocks packed schedule — the four- and sixteen-lane rows, and any
-geometry whose buffer reaches 256 Goldilocks elements — runs on a
-defective path on GFNI hosts: the Goldilocks packed kernels of released
-`fgf` 1.0.0 compute incorrect values through this transform there,
-non-deterministically between processes with identical input, while the
-scalar backend is exact. The fused schedule is scalar element arithmetic
-throughout and is checked against an independent direct DFT at wide
-geometries, so every geometry the selector routes to it is exact. Every
-op-level differential (`mul_into`, prepared `mul_into_with`,
-`sub_assign`, `mul_assign`, `mul_assign_with`, at the relevant widths and
-random values) passes, so the defect lives in a kernel state the isolated
-probes do not reproduce — consistent with stale upper-register contents in
-the vector kernels. The packed-schedule columns are timing-only records:
-the transform's work is value-independent, but correctness at those widths
-is not established until `fgf` fixes the kernel. The FastECC comparison
-below validates round trips at every geometry and times `butterfly-fft`
-only where the round trip holds.
-
+QuadMersenne31 rides `fgf` 1.1.0's AVX2 kernels at every row width the
+selector routes to it; Goldilocks single-lane and two-lane rows run the
+batched region form. Both directions sit within a few percent of each
+other — the inverse differs only by the twiddle table and one final
+scaling pass.
 
 ### FastECC comparison
 
@@ -161,49 +158,43 @@ taskset -c <cpu> cargo bench --manifest-path benchmarks/afft/Cargo.toml \
     --bench ntt_competitor
 ```
 
-One complete pinned Lunar Lake run on the fused-schedule tree, criterion
-medians, **forward/inverse**; `-` marks cells the correctness finding
-above excludes. This campaign supersedes the earlier table recorded
-before the fused schedule landed: its `butterfly-fft` column predates the
-single-lane fused butterflies, and its FastECC columns are not
-reproducible against the pinned revision on this host — historical
-numbers are never reused without rerunning.
+One complete pinned Lunar Lake run on the adopted three-way schedule over
+the `fgf` 1.1.0 kernels, criterion medians, **forward/inverse**. Every
+geometry round-trips exactly; no cell is excluded. Historical numbers are
+never reused without rerunning.
 
 | Size | lanes | `butterfly-fft` | FastECC |
 | ---: | ---: | ---: | ---: |
-| 64 | 1 | 55.6/54.2 | 91.2/78.0 |
-| 64 | 4 | - | 217/196 |
-| 64 | 16 | - | 613/571 |
-| 256 | 1 | 31.2/31.0 | 72.4/70.1 |
-| 256 | 4 | - | 164/161 |
-| 256 | 16 | - | 441/429 |
-| 1024 | 1 | 21.8/21.6 | 56.6/56.3 |
-| 1024 | 4 | - | 126/126 |
-| 1024 | 16 | - | 328/329 |
-| 4096 | 1 | 18.7/18.6 | 44.4/44.6 |
-| 4096 | 4 | - | 100/100 |
-| 4096 | 16 | - | 220/219 |
-| 16384 | 1 | 15.2/15.0 | 34.7/34.5 |
-| 16384 | 4 | - | 66.3/66.1 |
-| 16384 | 16 | - | 170/171 |
-| 65536 | 1 | 12.8/12.9 | 19.5/19.6 |
-| 65536 | 4 | - | 52.6/52.4 |
-| 65536 | 16 | - | 140/140 |
+| 64 | 1 | 59.2/56.9 | 90.6/76.9 |
+| 64 | 4 | 112/106 | 214/194 |
+| 64 | 16 | 205/184 | 607/565 |
+| 256 | 1 | 54.1/52.7 | 71.4/68.9 |
+| 256 | 4 | 97.4/92.8 | 163/160 |
+| 256 | 16 | 153/141 | 447/439 |
+| 1024 | 1 | 48.6/47.9 | 55.4/55.5 |
+| 1024 | 4 | 83.3/79.6 | 127/127 |
+| 1024 | 16 | 121/112 | 336/334 |
+| 4096 | 1 | 45.2/44.5 | 44.6/44.7 |
+| 4096 | 4 | 73.4/70.7 | 99.9/99.2 |
+| 4096 | 16 | 103/97.4 | 212/213 |
+| 16384 | 1 | 39.4/38.8 | 33.9/34.1 |
+| 16384 | 4 | 62.3/60.3 | 64.5/64.7 |
+| 16384 | 16 | 87.3/82.9 | 174/174 |
+| 65536 | 1 | 34.8/34.4 | 19.8/19.8 |
+| 65536 | 4 | 56.4/54.8 | 51.4/51.3 |
+| 65536 | 16 | 73.7/70.4 | 144/117 |
 
-FastECC still leads every validated geometry — 1.6× at 64 points and
-1.5× at the largest single-lane size, narrowed from 3.8× and 2.1× before
-the fused schedule. Its field carries half the bytes per element and its
-32-bit multiply-with-reciprocal reduction is cheaper per element than
-Goldilocks' 64-bit fold, while `butterfly-fft`'s wide lanes ride the
-general-purpose `fgf` element kernels and its single lanes run exact
-scalar arithmetic. Closing the remainder is `fgf`-side work: the packed
-Goldilocks kernels own both the correctness defect at wide geometries and
-the per-element cost at narrow ones, and `QuadMersenne31` has no vector
-kernels at all. FastECC's inverse is deliberately unnormalized (its round
-trip scales the input by the point count) and its forward output is
-natural only through the row-pointer table its MFA leaves permuted, so
-the two arms' inverse and output-layout contracts do not match exactly;
-both arms are validated against their own contract before timing.
+`butterfly-fft` leads every single-lane geometry from 4096 points up —
+1.8× at the largest size — and the four-lane rows above 16 K; FastECC's
+lead survives at small sizes and dominates the sixteen-lane rows, where
+its field packs half the bytes per element and its MFA's memory-friendly
+access pattern multiplies four-byte lanes the general-purpose element
+kernels cannot match at that width. FastECC's inverse is deliberately
+unnormalized (its round trip scales the input by the point count) and its
+forward output is natural only through the row-pointer table its MFA
+leaves permuted, so the two arms' inverse and output-layout contracts do
+not match exactly; both arms are validated against their own contract
+before timing.
 
 ## Additive transforms: competitor matrix
 

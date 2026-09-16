@@ -87,10 +87,12 @@ documented once in the umbrella's root `AGENTS.md`. Crate specifics:
   minutes; growing it past that needs a reason.
 - **`COV_IGNORE` is empty**: every line counts toward the 95% gate.
 - **Bench target:** `ntt` — `just bench-save ntt`, then `just bench ntt`.
-  The `ntt_tuning` target (requires `internals`) drives the fused and
-  packed NTT butterfly schedules past production selection for crossover
-  measurement; its record is the "NTT fused butterflies" section of
-  `BENCHMARKS.md`.
+  The `ntt_tuning` target (requires `internals`) drives the fused,
+  batched, packed, and four-step NTT butterfly schedules past production
+  selection for crossover measurement, validating every arm against the
+  fused arm and an exact round trip before timing; its record is the
+  "Butterfly schedules" section of `BENCHMARKS.md`, which also carries the
+  four-step rejection and its revisit bar.
 - `justfile` is a byte-identical vendored copy; never edit it here or the
   umbrella's `just drift` check fails. Crate-specific values and recipes belong
   in `crate.just`.
