@@ -111,17 +111,6 @@ unsafe fn multiply_ssse3(value: __m128i, table: &ScaleTable) -> __m128i {
     )
 }
 
-/// `source * coefficient` for interleaved GF(2^16) elements, GFNI form.
-#[target_feature(enable = "avx2,gfni")]
-unsafe fn scaled_vector_gfni(source: __m256i, same: i16, cross: i16) -> __m256i {
-    // SAFETY: the mask constant is 32 bytes; unaligned load is allowed.
-    let swap_mask = unsafe { _mm256_loadu_si256(SWAP_ADJACENT.as_ptr().cast::<__m256i>()) };
-    let swapped = _mm256_shuffle_epi8(source, swap_mask);
-    let direct = _mm256_gf2p8mul_epi8(source, _mm256_set1_epi16(same));
-    let crossed = _mm256_gf2p8mul_epi8(swapped, _mm256_set1_epi16(cross));
-    _mm256_xor_si256(direct, crossed)
-}
-
 /// `source * coefficient` for interleaved GF(2^16) elements, AVX2 form.
 #[target_feature(enable = "avx2")]
 unsafe fn scaled_vector_avx2(source: __m256i, tables: &[ScaleTable; 4]) -> __m256i {
@@ -179,66 +168,6 @@ unsafe fn scaled_vector_ssse3(source: __m128i, tables: &[ScaleTable; 4]) -> __m1
 // ---------------------------------------------------------------------------
 // GF(2^8) fused butterflies
 // ---------------------------------------------------------------------------
-
-#[target_feature(enable = "avx2,gfni")]
-pub(super) unsafe fn gf8_fused_forward_gfni(
-    low: &mut [u8],
-    high: &mut [u8],
-    coefficient: gf8b::Elem,
-) {
-    let coeff = _mm256_set1_epi8(coefficient.to_raw().cast_signed());
-    let vector_len = low.len() / 32 * 32;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 32 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                _mm256_loadu_si256(low.as_ptr().add(offset).cast::<__m256i>()),
-                _mm256_loadu_si256(high.as_ptr().add(offset).cast::<__m256i>()),
-            )
-        };
-        let scaled = _mm256_gf2p8mul_epi8(h, coeff);
-        let new_low = _mm256_xor_si256(l, scaled);
-        let new_high = _mm256_xor_si256(h, new_low);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            _mm256_storeu_si256(low.as_mut_ptr().add(offset).cast::<__m256i>(), new_low);
-            _mm256_storeu_si256(high.as_mut_ptr().add(offset).cast::<__m256i>(), new_high);
-        }
-        offset += 32;
-    }
-    scalar::fused_forward::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
-}
-
-#[target_feature(enable = "avx2,gfni")]
-pub(super) unsafe fn gf8_fused_inverse_gfni(
-    low: &mut [u8],
-    high: &mut [u8],
-    coefficient: gf8b::Elem,
-) {
-    let coeff = _mm256_set1_epi8(coefficient.to_raw().cast_signed());
-    let vector_len = low.len() / 32 * 32;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 32 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                _mm256_loadu_si256(low.as_ptr().add(offset).cast::<__m256i>()),
-                _mm256_loadu_si256(high.as_ptr().add(offset).cast::<__m256i>()),
-            )
-        };
-        let new_high = _mm256_xor_si256(h, l);
-        let scaled = _mm256_gf2p8mul_epi8(new_high, coeff);
-        let new_low = _mm256_xor_si256(l, scaled);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            _mm256_storeu_si256(low.as_mut_ptr().add(offset).cast::<__m256i>(), new_low);
-            _mm256_storeu_si256(high.as_mut_ptr().add(offset).cast::<__m256i>(), new_high);
-        }
-        offset += 32;
-    }
-    scalar::fused_inverse::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
-}
 
 #[target_feature(enable = "avx2")]
 pub(super) unsafe fn gf8_fused_forward_avx2(
@@ -368,68 +297,6 @@ pub(super) unsafe fn gf8_fused_inverse_ssse3(
 // GF(2^16) fused butterflies
 // ---------------------------------------------------------------------------
 
-#[target_feature(enable = "avx2,gfni")]
-pub(super) unsafe fn gf16_fused_forward_gfni(
-    low: &mut [u8],
-    high: &mut [u8],
-    coefficient: gf16::Elem,
-) {
-    let (same, cross) = factor_words(coefficient);
-    let vector_len = low.len() / 32 * 32;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 32 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                _mm256_loadu_si256(low.as_ptr().add(offset).cast::<__m256i>()),
-                _mm256_loadu_si256(high.as_ptr().add(offset).cast::<__m256i>()),
-            )
-        };
-        // SAFETY: AVX2+GFNI are enabled by the enclosing target_feature.
-        let scaled = unsafe { scaled_vector_gfni(h, same, cross) };
-        let new_low = _mm256_xor_si256(l, scaled);
-        let new_high = _mm256_xor_si256(h, new_low);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            _mm256_storeu_si256(low.as_mut_ptr().add(offset).cast::<__m256i>(), new_low);
-            _mm256_storeu_si256(high.as_mut_ptr().add(offset).cast::<__m256i>(), new_high);
-        }
-        offset += 32;
-    }
-    scalar::fused_forward::<Gf16>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
-}
-
-#[target_feature(enable = "avx2,gfni")]
-pub(super) unsafe fn gf16_fused_inverse_gfni(
-    low: &mut [u8],
-    high: &mut [u8],
-    coefficient: gf16::Elem,
-) {
-    let (same, cross) = factor_words(coefficient);
-    let vector_len = low.len() / 32 * 32;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 32 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                _mm256_loadu_si256(low.as_ptr().add(offset).cast::<__m256i>()),
-                _mm256_loadu_si256(high.as_ptr().add(offset).cast::<__m256i>()),
-            )
-        };
-        let new_high = _mm256_xor_si256(h, l);
-        // SAFETY: AVX2+GFNI are enabled by the enclosing target_feature.
-        let scaled = unsafe { scaled_vector_gfni(new_high, same, cross) };
-        let new_low = _mm256_xor_si256(l, scaled);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            _mm256_storeu_si256(low.as_mut_ptr().add(offset).cast::<__m256i>(), new_low);
-            _mm256_storeu_si256(high.as_mut_ptr().add(offset).cast::<__m256i>(), new_high);
-        }
-        offset += 32;
-    }
-    scalar::fused_inverse::<Gf16>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
-}
-
 #[target_feature(enable = "avx2")]
 pub(super) unsafe fn gf16_fused_forward_avx2(
     low: &mut [u8],
@@ -553,3 +420,9 @@ pub(super) unsafe fn gf16_fused_inverse_ssse3(
     }
     scalar::fused_inverse::<Gf16>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
 }
+
+mod gfni;
+pub(super) use gfni::{
+    gf8_fused_forward_gfni, gf8_fused_inverse_gfni, gf16_fused_forward_gfni,
+    gf16_fused_inverse_gfni,
+};

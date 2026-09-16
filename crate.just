@@ -16,4 +16,10 @@ MIRI := '--no-default-features'
 
 # Coverage exclusions for code that cannot execute on a CI host. Empty means
 # every line of the crate counts.
-COV_IGNORE := ''
+# GFNI butterfly kernels: only GFNI-capable hosts execute a line of
+# kernel/x86/gfni.rs, and the hosted CI fleet mixes Xeon generations, so
+# counting it made the gate depend on which runner the job landed on (the
+# same runner-dependence fgf documents for its GFNI files). The
+# direct-kernel differential tests cover the file wherever the host can
+# summon the tier; everywhere else they skip with a printed notice.
+COV_IGNORE := 'kernel/x86/gfni\.rs$'

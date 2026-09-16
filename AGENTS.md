@@ -85,7 +85,11 @@ documented once in the umbrella's root `AGENTS.md`. Crate specifics:
   multi-element rows, partial-element tails, awkward truncations — stays
   represented at the smaller sizes. The full run sits near twenty-six
   minutes; growing it past that needs a reason.
-- **`COV_IGNORE` is empty**: every line counts toward the 95% gate.
+- **`COV_IGNORE` excludes `kernel/x86/gfni.rs`**: only GFNI-capable hosts
+  execute a line of it, and the hosted CI fleet mixes Xeon generations, so
+  counting the file made the gate depend on which runner the job landed
+  on. The direct-kernel differential tests cover it wherever the host can
+  summon the tier; elsewhere they skip with a printed notice.
 - **Bench target:** `ntt` — `just bench-save ntt`, then `just bench ntt`.
   The `ntt_tuning` target (requires `internals`) drives the fused,
   batched, packed, and four-step NTT butterfly schedules past production
