@@ -1,6 +1,6 @@
 //! `x86`/`x86_64` butterfly kernels for GF(2^8) and GF(2^16).
 //!
-//! Three tiers, selected at runtime by [`crate::core::kernel::backend`]:
+//! Three tiers, selected at runtime by [`crate::kernel::backend`]:
 //!
 //! - **GFNI** (with AVX2): `GF2P8MULB` multiplies 32 GF(2^8) lanes in the
 //!   AES polynomial directly. GF(2^16) uses the interleaved-component trick:
@@ -58,7 +58,7 @@ fn scale_table(coefficient: gf8b::Elem) -> ScaleTable {
 /// `same = [c0, c0+c1]`, `cross = [Δ·c1, c1]` in each 16-bit lane.
 #[inline]
 fn factor_words(coefficient: gf16::Elem) -> (i16, i16) {
-    let (c0, c1) = coefficient.components();
+    let (c0, c1) = coefficient.to_components();
     let delta_c1 = gf16::DELTA.mul(c1);
     let same = i16::from_le_bytes([c0.to_raw(), c0.add(c1).to_raw()]);
     let cross = i16::from_le_bytes([delta_c1.to_raw(), c1.to_raw()]);
@@ -68,7 +68,7 @@ fn factor_words(coefficient: gf16::Elem) -> (i16, i16) {
 /// The four base-field nibble tables for the AVX2/SSSE3 GF(2^16) trick:
 /// `c0`, `c0+c1`, `Δ·c1`, `c1`.
 fn factor_tables(coefficient: gf16::Elem) -> [ScaleTable; 4] {
-    let (c0, c1) = coefficient.components();
+    let (c0, c1) = coefficient.to_components();
     [
         scale_table(c0),
         scale_table(c0.add(c1)),

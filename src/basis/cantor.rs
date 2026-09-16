@@ -21,22 +21,24 @@
 
 use ::alloc::vec::Vec;
 
-use fgf::field::{Elem, Field};
+use fgf::field::Elem;
 
 use super::gf2;
 use super::{OrderedBasis, independent};
 use crate::error::PlanError;
+use crate::kernel::ButterflyKernels;
 
-/// The Cantor basis of a field: `v_0 = 1`, `v_i² + v_i = v_{i-1}`.
+/// The Cantor basis of a binary extension field: `v_0 = 1`,
+/// `v_i² + v_i = v_{i-1}`.
 ///
-/// Obtain a shared instance from [`cantor_basis`] rather than rebuilding;
+/// Obtain a shared instance from `cantor_basis` rather than rebuilding;
 /// the chain is a property of the field, not of any one transform.
 #[derive(Clone, Debug)]
-pub struct CantorBasis<F: Field> {
+pub struct CantorBasis<F: ButterflyKernels> {
     elements: Vec<F::Elem>,
 }
 
-impl<F: Field> CantorBasis<F> {
+impl<F: ButterflyKernels> CantorBasis<F> {
     /// Solve the Cantor chain for this field.
     ///
     /// # Errors
@@ -66,7 +68,7 @@ impl<F: Field> CantorBasis<F> {
     }
 }
 
-impl<F: Field> OrderedBasis<F> for CantorBasis<F>
+impl<F: ButterflyKernels> OrderedBasis<F> for CantorBasis<F>
 where
     F::Elem: Send + Sync,
 {
@@ -88,7 +90,7 @@ where
 #[cfg(feature = "std")]
 pub fn cantor_basis<F>() -> Result<::alloc::sync::Arc<CantorBasis<F>>, PlanError>
 where
-    F: Field,
+    F: ButterflyKernels,
     F::Elem: Send + Sync,
 {
     use ::alloc::sync::Arc;
@@ -121,11 +123,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::factors;
-    use fgf::{FanPaar8, FanPaar16, Gf8B, Gf16, Gf32, Gf64};
+    use crate::transform::factors;
+    use fgf::{FanPaar8, FanPaar16, Gf8B, Gf8D, Gf16, Gf32, Gf64};
 
     /// Contract: `v_0 = 1` and `v_i² + v_i = v_{i-1}` for every step.
-    fn chain_holds<F: Field>() {
+    fn chain_holds<F: ButterflyKernels>() {
         let basis = CantorBasis::<F>::build().expect("power-of-two degree");
         let elements = basis.elements();
         assert_eq!(elements.len(), F::BITS as usize);
@@ -144,6 +146,7 @@ mod tests {
     #[test]
     fn cantor_chain_holds_for_every_field() {
         chain_holds::<Gf8B>();
+        chain_holds::<Gf8D>();
         chain_holds::<Gf16>();
         chain_holds::<Gf32>();
         chain_holds::<Gf64>();
@@ -153,7 +156,7 @@ mod tests {
 
     #[test]
     fn cantor_elements_are_a_basis() {
-        fn check<F: Field>() {
+        fn check<F: ButterflyKernels>() {
             let basis = CantorBasis::<F>::build().unwrap();
             assert!(independent::<F>(basis.elements()), "{}", F::NAME);
         }
@@ -169,7 +172,7 @@ mod tests {
     /// exactly when `j` is a submask of `k` (Lucas).
     #[test]
     fn subspace_polynomials_follow_pascal_mod_two() {
-        fn check<F: Field>() {
+        fn check<F: ButterflyKernels>() {
             let basis = CantorBasis::<F>::build().unwrap();
             let polynomials = factors::subspace_polynomials(basis.elements())
                 .expect("cantor basis is independent");

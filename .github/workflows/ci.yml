@@ -97,11 +97,11 @@ jobs:
       - run: cargo build --target ${{ matrix.target }}
 
   msrv:
-    name: msrv 1.89
+    name: msrv 1.93
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1.93.0
       - run: cargo build --all-features
 
   lint:
@@ -117,8 +117,8 @@ jobs:
       - run: cargo doc --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
-      # This crate has a module named `core`; relative sysroot paths are
-      # footguns. Enforce absolute `::core` / `::std` paths in crate code.
+      # Enforce absolute `::core` / `::std` paths in crate code, so a future
+      # module can never shadow a sysroot name.
       - name: sysroot paths must be absolute
         run: '! grep -rnE "^\s*use (core|std)::" src/'
 

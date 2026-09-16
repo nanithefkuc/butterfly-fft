@@ -21,8 +21,9 @@ use additive_fft_reed_solomon::kernel::gfni_kernel::GfniKernel;
 use additive_fft_reed_solomon::kernel::lut_kernel::LutKernel;
 use additive_fft_reed_solomon::poly_11d_lut::CantorBasisLut11d;
 use butterfly_fft::basis::cantor_basis;
-use butterfly_fft::core::kernel::backend as butterfly_fft_backend;
-use butterfly_fft::core::transform::TransformPlan;
+use butterfly_fft::internals;
+use butterfly_fft::kernel::backend as butterfly_fft_backend;
+use butterfly_fft::transform::TransformPlan;
 use butterfly_fft_bench::{LeopardBuffer, NanorsBuffer, leopard_backend, nanors_backend};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fgf::{Gf8B, Gf16};
@@ -260,10 +261,10 @@ fn raw_gf16(c: &mut Criterion) {
             |b, case| {
                 b.iter(|| {
                     butterfly_fft
-                        .derivative_bytes(
-                            black_box(&input),
-                            case.row_len,
+                        .derivative_into_bytes(
                             black_box(&mut butterfly_fft_derivative),
+                            case.row_len,
+                            black_box(&input),
                         )
                         .expect("valid butterfly-fft row geometry");
                     black_box(&butterfly_fft_derivative);
@@ -290,37 +291,37 @@ fn raw_gf16(c: &mut Criterion) {
         let mut sweep_output = vec![0; case.bytes];
         strategies.bench_with_input(BenchmarkId::new("sweep", &case_id), &case, |b, case| {
             b.iter(|| {
-                butterfly_fft
-                    .derivative_bytes_sweep(
-                        black_box(&input),
-                        case.row_len,
-                        black_box(&mut sweep_output),
-                    )
-                    .expect("valid sweep geometry");
+                internals::derivative_into_bytes_sweep(
+                    &butterfly_fft,
+                    black_box(&mut sweep_output),
+                    case.row_len,
+                    black_box(&input),
+                )
+                .expect("valid sweep geometry");
             });
         });
         let mut gather_output = vec![0; case.bytes];
         strategies.bench_with_input(BenchmarkId::new("gather", &case_id), &case, |b, case| {
             b.iter(|| {
-                butterfly_fft
-                    .derivative_bytes_gather(
-                        black_box(&input),
-                        case.row_len,
-                        black_box(&mut gather_output),
-                    )
-                    .expect("valid gather geometry");
+                internals::derivative_into_bytes_gather(
+                    &butterfly_fft,
+                    black_box(&mut gather_output),
+                    case.row_len,
+                    black_box(&input),
+                )
+                .expect("valid gather geometry");
             });
         });
         let mut overwrite_output = vec![0; case.bytes];
         strategies.bench_with_input(BenchmarkId::new("overwrite", &case_id), &case, |b, case| {
             b.iter(|| {
-                butterfly_fft
-                    .derivative_bytes_overwrite(
-                        black_box(&input),
-                        case.row_len,
-                        black_box(&mut overwrite_output),
-                    )
-                    .expect("valid overwrite geometry");
+                internals::derivative_into_bytes_overwrite(
+                    &butterfly_fft,
+                    black_box(&mut overwrite_output),
+                    case.row_len,
+                    black_box(&input),
+                )
+                .expect("valid overwrite geometry");
             });
         });
         strategies.finish();
@@ -582,37 +583,37 @@ fn raw_gf8(c: &mut Criterion) {
         let mut sweep_output = vec![0; case.bytes];
         strategies.bench_with_input(BenchmarkId::new("sweep", &case_id), &case, |b, case| {
             b.iter(|| {
-                butterfly_fft
-                    .derivative_bytes_sweep(
-                        black_box(&input),
-                        case.row_len,
-                        black_box(&mut sweep_output),
-                    )
-                    .expect("valid GF8 sweep geometry");
+                internals::derivative_into_bytes_sweep(
+                    &butterfly_fft,
+                    black_box(&mut sweep_output),
+                    case.row_len,
+                    black_box(&input),
+                )
+                .expect("valid GF8 sweep geometry");
             });
         });
         let mut gather_output = vec![0; case.bytes];
         strategies.bench_with_input(BenchmarkId::new("gather", &case_id), &case, |b, case| {
             b.iter(|| {
-                butterfly_fft
-                    .derivative_bytes_gather(
-                        black_box(&input),
-                        case.row_len,
-                        black_box(&mut gather_output),
-                    )
-                    .expect("valid GF8 gather geometry");
+                internals::derivative_into_bytes_gather(
+                    &butterfly_fft,
+                    black_box(&mut gather_output),
+                    case.row_len,
+                    black_box(&input),
+                )
+                .expect("valid GF8 gather geometry");
             });
         });
         let mut overwrite_output = vec![0; case.bytes];
         strategies.bench_with_input(BenchmarkId::new("overwrite", &case_id), &case, |b, case| {
             b.iter(|| {
-                butterfly_fft
-                    .derivative_bytes_overwrite(
-                        black_box(&input),
-                        case.row_len,
-                        black_box(&mut overwrite_output),
-                    )
-                    .expect("valid GF8 overwrite geometry");
+                internals::derivative_into_bytes_overwrite(
+                    &butterfly_fft,
+                    black_box(&mut overwrite_output),
+                    case.row_len,
+                    black_box(&input),
+                )
+                .expect("valid GF8 overwrite geometry");
             });
         });
         strategies.finish();

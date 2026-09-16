@@ -39,8 +39,9 @@ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
 name = "archmage"
-version = "0.9.28"
-source = "git+https://github.com/nanithefkuc/archmage?rev=de519319b5670d93f71dada4c49cdfd83c0fc0ec#de519319b5670d93f71dada4c49cdfd83c0fc0ec"
+version = "0.9.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e3a17fc8196cce2902db52de7a21d4407971d080c01a0256037fcd3fc6e536e"
 dependencies = [
  "archmage-macros",
  "safe_unaligned_simd",
@@ -49,12 +50,13 @@ dependencies = [
 
 [[package]]
 name = "archmage-macros"
-version = "0.9.28"
-source = "git+https://github.com/nanithefkuc/archmage?rev=de519319b5670d93f71dada4c49cdfd83c0fc0ec#de519319b5670d93f71dada4c49cdfd83c0fc0ec"
+version = "0.9.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d0c10fb756a60ff9418d3e5dcd2b665c5914e32391d2523995d2c2c09237ac6"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -204,9 +206,11 @@ checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
 name = "fgf"
-version = "0.7.0"
-source = "git+https://github.com/nanithefkuc/fgf?rev=d5a1fa5f4cf39e666725f0089674093203aeba45#d5a1fa5f4cf39e666725f0089674093203aeba45"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d4d1d9566482a1af765c2b79abc8b38e77f85b8ca9c7d2d3d1a5b29f42410f0"
 dependencies = [
+ "archmage",
  "simdispatch",
 ]
 
@@ -381,7 +385,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -405,8 +409,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "simdispatch"
-version = "0.0.0"
-source = "git+https://github.com/nanithefkuc/simdispatch?rev=5940194107384953cd8cd9f45c8d902b26d5686e#5940194107384953cd8cd9f45c8d902b26d5686e"
+version = "0.1.0"
 dependencies = [
  "archmage",
 ]
@@ -424,9 +427,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.3"
+version = "3.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+checksum = "12df2e0110f65b775f769bb17ef989067a1d931b2eb822bd4346631eeada89f9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -514,3 +517,7 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[patch.unused]]
+name = "poly-ring"
+version = "0.1.0"

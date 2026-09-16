@@ -2,7 +2,7 @@
 //!
 //! Plan construction (root search, permutation, twiddle preparation) and
 //! scratch allocation are timed separately from the steady-state
-//! `forward_bytes`/`inverse_bytes`, which allocate and prepare nothing.
+//! `forward_bytes_scratch`/`inverse_bytes_scratch`, which allocate and prepare nothing.
 //!
 //! Only Goldilocks and `QuadMersenne31` appear. `Gf8B` and `Gf16` have odd
 //! multiplicative group order (`2^m - 1`), and base `Mersenne31` has
@@ -34,8 +34,8 @@ fn fill<F: Field>(bytes: &mut [u8], seed: u64) {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
-        let value = F::read(&state.to_le_bytes()[..F::BYTES]);
-        F::write(slot, value.add(F::Elem::ZERO));
+        let value = F::decode(&state.to_le_bytes()[..F::BYTES]);
+        F::encode(slot, value.add(F::Elem::ZERO));
     }
 }
 
@@ -69,13 +69,13 @@ fn execution<F: FieldKernels>(criterion: &mut Criterion) {
             group.throughput(Throughput::Elements((size * lanes) as u64));
             group.bench_function(format!("forward/{size}/{lanes}"), |bencher| {
                 bencher.iter(|| {
-                    plan.forward_bytes(black_box(&mut rows), row_len, &mut scratch)
+                    plan.forward_bytes_scratch(black_box(&mut rows), row_len, &mut scratch)
                         .expect("forward");
                 });
             });
             group.bench_function(format!("inverse/{size}/{lanes}"), |bencher| {
                 bencher.iter(|| {
-                    plan.inverse_bytes(black_box(&mut rows), row_len, &mut scratch)
+                    plan.inverse_bytes_scratch(black_box(&mut rows), row_len, &mut scratch)
                         .expect("inverse");
                 });
             });

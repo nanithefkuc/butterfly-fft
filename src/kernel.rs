@@ -6,7 +6,7 @@
 //! once per process; every SIMD backend is differentially tested against the
 //! portable scalar implementation, which also serves vector tails.
 //!
-//! ## Backends
+//! # Backends
 //!
 //! `butterfly-fft` supports a subset of [`Backend`] (a re-export of
 //! [`simdispatch::Backend`](https://docs.rs/simdispatch)): the
@@ -14,7 +14,7 @@
 //! `AArch64` GF(2^8) and GF(2^16) butterflies. WebAssembly runs scalar (no
 //! dedicated `wasm128` butterflies), and wider fields always report
 //! [`Backend::Scalar`]. Detection, ordering, and the downgrade-only override
-//! are single-source: [`Selection`] resolves over [`BUTTERFLY_FFT_TIERS`].
+//! are single-source: `Selection` resolves over [`BUTTERFLY_FFT_TIERS`].
 //!
 //! The process backend may be downgraded at startup via the one stack-wide
 //! `SIMD_BACKEND` environment variable (`v3_gfni_crypto`, `v3`, `v2`,
@@ -25,8 +25,8 @@
 //!
 //! On an `AArch64` `PMULL` host this resolves to [`Backend::NeonAes`] (the
 //! tier's `aes` feature proves `PMULL`) even though the butterflies run the
-//! NEON kernels — the historical `supported_on_host` had no `PMULL` arm and
-//! silently reported `Neon` (the rot this crate's parent plan deletes).
+//! same NEON kernels as the plain [`Backend::Neon`] tier; only the reported
+//! tier label differs.
 
 // Unsafe is expected and confined here: this module owns every intrinsic in
 // the crate, all behind runtime feature detection. The rest of the crate
@@ -35,15 +35,15 @@
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
 mod aarch64;
+mod fields;
 mod scalar;
 #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
 mod x86;
 
 use ::core::marker::PhantomData;
 
-use fgf::field::Elem;
+use fgf::field::{Elem, Field};
 use fgf::kernel::FieldKernels;
-use fgf::{FanPaar8, FanPaar16, FanPaar32, FanPaar64, Gf8B, Gf16, Gf32, Gf64};
 
 // The backend ladder and the downgrade-only override are owned by
 // `simdispatch` (Level 0); fgf re-exports the same ladder, so `Backend`
@@ -107,9 +107,8 @@ static BACKEND: ::std::sync::LazyLock<Backend> = ::std::sync::LazyLock::new(|| {
 /// always report [`Backend::Scalar`].
 ///
 /// The narrowing reads the cached backend rather than re-running `Selection`
-/// (which would touch the environment on every call — an allocation in the
-/// steady-state path); the old weaker-of-two merge against fgf's field cap is
-/// gone.
+/// on every call, which would touch the environment inside the
+/// steady-state path.
 #[inline]
 #[must_use]
 pub fn backend_for<F: ButterflyKernels>() -> Backend {
@@ -121,228 +120,127 @@ pub fn backend_for<F: ButterflyKernels>() -> Backend {
     }
 }
 
+#[allow(dead_code)]
+pub(crate) struct RawDispatch;
+
 mod private {
     pub trait Sealed {}
 }
 
-impl private::Sealed for Gf8B {}
-impl private::Sealed for Gf16 {}
-impl private::Sealed for Gf32 {}
-impl private::Sealed for Gf64 {}
-impl private::Sealed for FanPaar8 {}
-impl private::Sealed for FanPaar16 {}
-impl private::Sealed for FanPaar32 {}
-impl private::Sealed for FanPaar64 {}
-
-/// The per-field butterfly kernel contract.
+/// The per-field butterfly kernel contract: which tiers this field's
+/// butterflies implement.
 ///
-/// Sealed: `butterfly-fft` implements this for `fgf`'s fields, and the set of
-/// fields with dedicated SIMD kernels (currently GF(2^8) and GF(2^16)) is fixed
-/// by the implementation. Fields without dedicated kernels inherit the portable
-/// scalar defaults, which is why every transform works over every `fgf` field.
-///
-/// Callers should use the safe wrappers ([`fused_forward`], [`fused_inverse`]
-/// and, in-crate, the backend structs plus the `dispatch_butterfly!`
-/// monomorphized dispatch) rather than these methods directly.
-///
-/// # Safety
-///
-/// Each `unsafe` method requires that the instruction set in its name was
-/// runtime-detected (see [`backend`]); the dispatch layer upholds this by
-/// construction. The scalar defaults are always safe to call.
-pub trait ButterflyKernels: FieldKernels + private::Sealed {
+/// Sealed: `butterfly-fft` implements this for `fgf`'s binary fields, and
+/// the set of fields with dedicated SIMD kernels — GF(2^8) and GF(2^16) —
+/// is fixed by the implementation. Fields without dedicated
+/// kernels inherit the portable scalar backend, which is why every
+/// transform works over every implementor. External code holds this bound
+/// but cannot construct the private `RawDispatch` proof the kernel
+/// entries require.
+#[allow(private_bounds)]
+pub trait ButterflyKernels: FieldKernels + private::Sealed + TierButterflies {
     /// The tiers this field's butterfly kernels implement, used to narrow
     /// [`backend_for`]. Only GF(2^8) and GF(2^16) vectorize, so the default
     /// is scalar-only.
     const BUTTERFLY_TIERS: &'static [Backend] = &[Backend::Scalar];
+}
 
+/// The per-tier kernel entries, sealed behind the private `RawDispatch`
+/// proof: the dispatch layer constructs the proof after runtime detection,
+/// and nothing else in the crate — or outside it — can.
+///
+/// # Preconditions
+///
+/// The byte slices must be equal-length with a whole number of elements.
+pub(crate) trait TierButterflies: Field {
     /// Fused forward butterfly, AVX2+GFNI kernel.
-    ///
-    /// # Safety
-    /// Requires AVX2 and GFNI; the byte slices must be equal-length with a
-    /// whole number of elements.
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_forward_gfni(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
+    fn fused_forward_gfni(
+        _proof: RawDispatch,
+        low: &mut [u8],
+        high: &mut [u8],
+        coefficient: Self::Elem,
+    ) {
         scalar::fused_forward::<Self>(low, high, coefficient);
     }
 
     /// Fused inverse butterfly, AVX2+GFNI kernel.
-    ///
-    /// # Safety
-    /// Same contract as [`ButterflyKernels::fused_forward_gfni`].
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_inverse_gfni(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
+    fn fused_inverse_gfni(
+        _proof: RawDispatch,
+        low: &mut [u8],
+        high: &mut [u8],
+        coefficient: Self::Elem,
+    ) {
         scalar::fused_inverse::<Self>(low, high, coefficient);
     }
 
     /// Fused forward butterfly, AVX2 kernel.
-    ///
-    /// # Safety
-    /// Requires AVX2; the byte slices must be equal-length with a whole
-    /// number of elements.
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_forward_avx2(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
+    fn fused_forward_avx2(
+        _proof: RawDispatch,
+        low: &mut [u8],
+        high: &mut [u8],
+        coefficient: Self::Elem,
+    ) {
         scalar::fused_forward::<Self>(low, high, coefficient);
     }
 
     /// Fused inverse butterfly, AVX2 kernel.
-    ///
-    /// # Safety
-    /// Same contract as [`ButterflyKernels::fused_forward_avx2`].
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_inverse_avx2(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
+    fn fused_inverse_avx2(
+        _proof: RawDispatch,
+        low: &mut [u8],
+        high: &mut [u8],
+        coefficient: Self::Elem,
+    ) {
         scalar::fused_inverse::<Self>(low, high, coefficient);
     }
 
     /// Fused forward butterfly, SSSE3 kernel.
-    ///
-    /// # Safety
-    /// Requires SSSE3; the byte slices must be equal-length with a whole
-    /// number of elements.
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_forward_ssse3(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
+    fn fused_forward_ssse3(
+        _proof: RawDispatch,
+        low: &mut [u8],
+        high: &mut [u8],
+        coefficient: Self::Elem,
+    ) {
         scalar::fused_forward::<Self>(low, high, coefficient);
     }
 
     /// Fused inverse butterfly, SSSE3 kernel.
-    ///
-    /// # Safety
-    /// Same contract as [`ButterflyKernels::fused_forward_ssse3`].
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_inverse_ssse3(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
+    fn fused_inverse_ssse3(
+        _proof: RawDispatch,
+        low: &mut [u8],
+        high: &mut [u8],
+        coefficient: Self::Elem,
+    ) {
         scalar::fused_inverse::<Self>(low, high, coefficient);
     }
 
     /// Fused forward butterfly, NEON kernel.
-    ///
-    /// # Safety
-    /// Requires NEON (baseline on AArch64); the byte slices must be
-    /// equal-length with a whole number of elements.
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-    unsafe fn fused_forward_neon(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
+    fn fused_forward_neon(
+        _proof: RawDispatch,
+        low: &mut [u8],
+        high: &mut [u8],
+        coefficient: Self::Elem,
+    ) {
         scalar::fused_forward::<Self>(low, high, coefficient);
     }
 
     /// Fused inverse butterfly, NEON kernel.
-    ///
-    /// # Safety
-    /// Same contract as [`ButterflyKernels::fused_forward_neon`].
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-    unsafe fn fused_inverse_neon(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
+    fn fused_inverse_neon(
+        _proof: RawDispatch,
+        low: &mut [u8],
+        high: &mut [u8],
+        coefficient: Self::Elem,
+    ) {
         scalar::fused_inverse::<Self>(low, high, coefficient);
     }
 }
-
-impl ButterflyKernels for Gf8B {
-    const BUTTERFLY_TIERS: &'static [Backend] = BUTTERFLY_FFT_TIERS;
-
-    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_forward_gfni(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: the dispatch layer selects GFNI only after detection.
-        unsafe { x86::gf8_fused_forward_gfni(low, high, coefficient) }
-    }
-
-    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_inverse_gfni(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: the dispatch layer selects GFNI only after detection.
-        unsafe { x86::gf8_fused_inverse_gfni(low, high, coefficient) }
-    }
-
-    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_forward_avx2(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: the dispatch layer selects AVX2 only after detection.
-        unsafe { x86::gf8_fused_forward_avx2(low, high, coefficient) }
-    }
-
-    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_inverse_avx2(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: the dispatch layer selects AVX2 only after detection.
-        unsafe { x86::gf8_fused_inverse_avx2(low, high, coefficient) }
-    }
-
-    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_forward_ssse3(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: the dispatch layer selects SSSE3 only after detection.
-        unsafe { x86::gf8_fused_forward_ssse3(low, high, coefficient) }
-    }
-
-    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_inverse_ssse3(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: the dispatch layer selects SSSE3 only after detection.
-        unsafe { x86::gf8_fused_inverse_ssse3(low, high, coefficient) }
-    }
-
-    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-    unsafe fn fused_forward_neon(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: NEON is baseline on AArch64.
-        unsafe { aarch64::gf8_fused_forward_neon(low, high, coefficient) }
-    }
-
-    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-    unsafe fn fused_inverse_neon(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: NEON is baseline on AArch64.
-        unsafe { aarch64::gf8_fused_inverse_neon(low, high, coefficient) }
-    }
-}
-
-impl ButterflyKernels for Gf16 {
-    const BUTTERFLY_TIERS: &'static [Backend] = BUTTERFLY_FFT_TIERS;
-
-    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_forward_gfni(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: the dispatch layer selects GFNI only after detection.
-        unsafe { x86::gf16_fused_forward_gfni(low, high, coefficient) }
-    }
-
-    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_inverse_gfni(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: the dispatch layer selects GFNI only after detection.
-        unsafe { x86::gf16_fused_inverse_gfni(low, high, coefficient) }
-    }
-
-    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_forward_avx2(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: the dispatch layer selects AVX2 only after detection.
-        unsafe { x86::gf16_fused_forward_avx2(low, high, coefficient) }
-    }
-
-    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_inverse_avx2(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: the dispatch layer selects AVX2 only after detection.
-        unsafe { x86::gf16_fused_inverse_avx2(low, high, coefficient) }
-    }
-
-    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_forward_ssse3(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: the dispatch layer selects SSSE3 only after detection.
-        unsafe { x86::gf16_fused_forward_ssse3(low, high, coefficient) }
-    }
-
-    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn fused_inverse_ssse3(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: the dispatch layer selects SSSE3 only after detection.
-        unsafe { x86::gf16_fused_inverse_ssse3(low, high, coefficient) }
-    }
-
-    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-    unsafe fn fused_forward_neon(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: NEON is baseline on AArch64.
-        unsafe { aarch64::gf16_fused_forward_neon(low, high, coefficient) }
-    }
-
-    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-    unsafe fn fused_inverse_neon(low: &mut [u8], high: &mut [u8], coefficient: Self::Elem) {
-        // SAFETY: NEON is baseline on AArch64.
-        unsafe { aarch64::gf16_fused_inverse_neon(low, high, coefficient) }
-    }
-}
-
-impl ButterflyKernels for Gf32 {}
-impl ButterflyKernels for Gf64 {}
-impl ButterflyKernels for FanPaar8 {}
-impl ButterflyKernels for FanPaar16 {}
-impl ButterflyKernels for FanPaar32 {}
-impl ButterflyKernels for FanPaar64 {}
 
 /// A backend tag type: selects which kernel set executes the butterflies.
 ///
@@ -350,7 +248,7 @@ impl ButterflyKernels for FanPaar64 {}
 /// whole recursion monomorphizes onto one backend — dispatch happens once
 /// per transform call, never per butterfly. Instantiated only through the
 /// `dispatch_butterfly!` macro; the trait methods are static.
-pub(crate) trait ButterflyBackend<F: ButterflyKernels> {
+pub(crate) trait ButterflyBackend<F: TierButterflies> {
     /// `low' = low ⊕ c·high`, `high' = low' ⊕ high` for nonzero `c`.
     fn forward_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem);
     /// `high' = high ⊕ low`, `low' = low ⊕ c·high'` for nonzero `c`.
@@ -359,7 +257,7 @@ pub(crate) trait ButterflyBackend<F: ButterflyKernels> {
 
 pub(crate) struct ScalarBackend<F>(PhantomData<fn() -> F>);
 
-impl<F: ButterflyKernels> ButterflyBackend<F> for ScalarBackend<F> {
+impl<F: TierButterflies> ButterflyBackend<F> for ScalarBackend<F> {
     #[inline]
     fn forward_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
         scalar::fused_forward::<F>(low, high, coefficient);
@@ -375,17 +273,15 @@ impl<F: ButterflyKernels> ButterflyBackend<F> for ScalarBackend<F> {
 pub(crate) struct GfniBackend<F>(PhantomData<fn() -> F>);
 
 #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-impl<F: ButterflyKernels> ButterflyBackend<F> for GfniBackend<F> {
+impl<F: TierButterflies> ButterflyBackend<F> for GfniBackend<F> {
     #[inline]
     fn forward_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        // SAFETY: this tag is selected only after AVX2+GFNI detection.
-        unsafe { F::fused_forward_gfni(low, high, coefficient) }
+        F::fused_forward_gfni(RawDispatch, low, high, coefficient);
     }
 
     #[inline]
     fn inverse_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        // SAFETY: this tag is selected only after AVX2+GFNI detection.
-        unsafe { F::fused_inverse_gfni(low, high, coefficient) }
+        F::fused_inverse_gfni(RawDispatch, low, high, coefficient);
     }
 }
 
@@ -393,17 +289,15 @@ impl<F: ButterflyKernels> ButterflyBackend<F> for GfniBackend<F> {
 pub(crate) struct Avx2Backend<F>(PhantomData<fn() -> F>);
 
 #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-impl<F: ButterflyKernels> ButterflyBackend<F> for Avx2Backend<F> {
+impl<F: TierButterflies> ButterflyBackend<F> for Avx2Backend<F> {
     #[inline]
     fn forward_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        // SAFETY: this tag is selected only after AVX2 detection.
-        unsafe { F::fused_forward_avx2(low, high, coefficient) }
+        F::fused_forward_avx2(RawDispatch, low, high, coefficient);
     }
 
     #[inline]
     fn inverse_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        // SAFETY: this tag is selected only after AVX2 detection.
-        unsafe { F::fused_inverse_avx2(low, high, coefficient) }
+        F::fused_inverse_avx2(RawDispatch, low, high, coefficient);
     }
 }
 
@@ -411,17 +305,15 @@ impl<F: ButterflyKernels> ButterflyBackend<F> for Avx2Backend<F> {
 pub(crate) struct Ssse3Backend<F>(PhantomData<fn() -> F>);
 
 #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-impl<F: ButterflyKernels> ButterflyBackend<F> for Ssse3Backend<F> {
+impl<F: TierButterflies> ButterflyBackend<F> for Ssse3Backend<F> {
     #[inline]
     fn forward_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        // SAFETY: this tag is selected only after SSSE3 detection.
-        unsafe { F::fused_forward_ssse3(low, high, coefficient) }
+        F::fused_forward_ssse3(RawDispatch, low, high, coefficient);
     }
 
     #[inline]
     fn inverse_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        // SAFETY: this tag is selected only after SSSE3 detection.
-        unsafe { F::fused_inverse_ssse3(low, high, coefficient) }
+        F::fused_inverse_ssse3(RawDispatch, low, high, coefficient);
     }
 }
 
@@ -429,17 +321,15 @@ impl<F: ButterflyKernels> ButterflyBackend<F> for Ssse3Backend<F> {
 pub(crate) struct NeonBackend<F>(PhantomData<fn() -> F>);
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-impl<F: ButterflyKernels> ButterflyBackend<F> for NeonBackend<F> {
+impl<F: TierButterflies> ButterflyBackend<F> for NeonBackend<F> {
     #[inline]
     fn forward_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        // SAFETY: NEON is baseline on AArch64.
-        unsafe { F::fused_forward_neon(low, high, coefficient) }
+        F::fused_forward_neon(RawDispatch, low, high, coefficient);
     }
 
     #[inline]
     fn inverse_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        // SAFETY: NEON is baseline on AArch64.
-        unsafe { F::fused_inverse_neon(low, high, coefficient) }
+        F::fused_inverse_neon(RawDispatch, low, high, coefficient);
     }
 }
 
@@ -449,37 +339,37 @@ impl<F: ButterflyKernels> ButterflyBackend<F> for NeonBackend<F> {
 /// the entire walker monomorphizes onto one backend per call.
 macro_rules! dispatch_butterfly {
     ($field:ty, $function:ident ($($argument:expr),* $(,)?)) => {
-        match $crate::core::kernel::backend_for::<$field>() {
-            $crate::core::kernel::Backend::Scalar => {
-                $function::<$field, $crate::core::kernel::ScalarBackend<$field>>($($argument),*)
+        match $crate::kernel::backend_for::<$field>() {
+            $crate::kernel::Backend::Scalar => {
+                $function::<$field, $crate::kernel::ScalarBackend<$field>>($($argument),*)
             }
             // Both `NeonAes` (AArch64 crypto, PMULL hosts) and `Neon` run the
             // same NEON butterflies; only the resolved tier label differs.
             #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            $crate::core::kernel::Backend::NeonAes | $crate::core::kernel::Backend::Neon => {
-                $function::<$field, $crate::core::kernel::NeonBackend<$field>>($($argument),*)
+            $crate::kernel::Backend::NeonAes | $crate::kernel::Backend::Neon => {
+                $function::<$field, $crate::kernel::NeonBackend<$field>>($($argument),*)
             }
             #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-            $crate::core::kernel::Backend::V3GfniCrypto => {
-                $function::<$field, $crate::core::kernel::GfniBackend<$field>>($($argument),*)
+            $crate::kernel::Backend::V3GfniCrypto => {
+                $function::<$field, $crate::kernel::GfniBackend<$field>>($($argument),*)
             }
             #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-            $crate::core::kernel::Backend::V3 => {
-                $function::<$field, $crate::core::kernel::Avx2Backend<$field>>($($argument),*)
+            $crate::kernel::Backend::V3 => {
+                $function::<$field, $crate::kernel::Avx2Backend<$field>>($($argument),*)
             }
             #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-            $crate::core::kernel::Backend::V2 => {
-                $function::<$field, $crate::core::kernel::Ssse3Backend<$field>>($($argument),*)
+            $crate::kernel::Backend::V2 => {
+                $function::<$field, $crate::kernel::Ssse3Backend<$field>>($($argument),*)
             }
             // backend_for never yields a backend outside the cfg'd set; the
             // wildcard only covers `Backend`'s non-exhaustiveness.
             #[allow(unreachable_patterns)]
-            _ => $function::<$field, $crate::core::kernel::ScalarBackend<$field>>($($argument),*),
+            _ => $function::<$field, $crate::kernel::ScalarBackend<$field>>($($argument),*),
         }
     };
 }
 
-// Walkers in `core::transform` call this through the path re-export.
+// Walkers in `transform` call this through the path re-export.
 pub(crate) use dispatch_butterfly;
 
 /// Fused forward butterfly on backend `B`, with fast paths for the trivial
@@ -487,7 +377,7 @@ pub(crate) use dispatch_butterfly;
 /// untouched) and one swaps their roles through two XORs (`low' = low ⊕
 /// high`, `high' = low`).
 #[inline]
-pub(crate) fn fused_forward_with<F: ButterflyKernels, B: ButterflyBackend<F>>(
+pub(crate) fn fused_forward_backend<F: ButterflyKernels, B: ButterflyBackend<F>>(
     low: &mut [u8],
     high: &mut [u8],
     coefficient: F::Elem,
@@ -508,7 +398,7 @@ pub(crate) fn fused_forward_with<F: ButterflyKernels, B: ButterflyBackend<F>>(
 /// fast paths: zero couples the halves with one XOR and one makes both
 /// outputs equal to `low ⊕ high`.
 #[inline]
-pub(crate) fn fused_inverse_with<F: ButterflyKernels, B: ButterflyBackend<F>>(
+pub(crate) fn fused_inverse_backend<F: ButterflyKernels, B: ButterflyBackend<F>>(
     low: &mut [u8],
     high: &mut [u8],
     coefficient: F::Elem,
@@ -543,7 +433,7 @@ pub fn fused_forward<F: ButterflyKernels>(low: &mut [u8], high: &mut [u8], coeff
         "butterfly halves must have equal length"
     );
     assert_eq!(low.len() % F::BYTES, 0, "partial trailing element");
-    crate::core::kernel::dispatch_butterfly!(F, fused_forward_with(low, high, coefficient));
+    crate::kernel::dispatch_butterfly!(F, fused_forward_backend(low, high, coefficient));
 }
 
 /// Fused inverse butterfly: `high' = high ⊕ low`, `low' = low ⊕ c·high'`.
@@ -561,68 +451,7 @@ pub fn fused_inverse<F: ButterflyKernels>(low: &mut [u8], high: &mut [u8], coeff
         "butterfly halves must have equal length"
     );
     assert_eq!(low.len() % F::BYTES, 0, "partial trailing element");
-    crate::core::kernel::dispatch_butterfly!(F, fused_inverse_with(low, high, coefficient));
-}
-
-/// XOR `coefficient * src` into `dst`, element by element.
-///
-/// Thin wrapper over [`fgf::ops::mul_add`] with the zero/one-coefficient
-/// fast paths; the workhorse for coefficient-scaled row accumulation outside
-/// the butterfly recursion.
-///
-/// # Panics
-/// Panics if `dst` and `src` differ in length or hold a partial trailing
-/// element.
-#[inline]
-pub fn xor_scaled_bytes<F: ButterflyKernels>(dst: &mut [u8], coefficient: F::Elem, src: &[u8]) {
-    assert_eq!(
-        dst.len(),
-        src.len(),
-        "scaled buffers must have equal length"
-    );
-    assert_eq!(src.len() % F::BYTES, 0, "partial trailing element");
-    if coefficient.is_zero() {
-        return;
-    }
-    if coefficient.is_one() {
-        fgf::ops::add_assign::<F>(dst, src);
-        return;
-    }
-    fgf::ops::mul_add::<F>(dst, coefficient, src);
-}
-
-/// XOR one source row into every destination row with a distinct coefficient.
-///
-/// `destinations` contains `coefficients.len()` contiguous rows of
-/// `row_len` bytes. Row `j` becomes
-/// `row_j ⊕ coefficients[j]·source`, element by element.
-///
-/// # Panics
-/// Panics if `row_len` is zero or holds a partial trailing element, if
-/// `source.len() != row_len`, if the destination geometry does not match, or
-/// if its complete byte length is not representable by [`usize`].
-#[inline]
-pub fn xor_scaled_bytes_rows<F: ButterflyKernels>(
-    destinations: &mut [u8],
-    row_len: usize,
-    coefficients: &[F::Elem],
-    source: &[u8],
-) {
-    assert_ne!(row_len, 0, "row length must be nonzero");
-    assert_eq!(row_len % F::BYTES, 0, "partial trailing element");
-    assert_eq!(source.len(), row_len, "source length must equal row length");
-    let expected = coefficients
-        .len()
-        .checked_mul(row_len)
-        .expect("destination byte length overflow");
-    assert_eq!(
-        destinations.len(),
-        expected,
-        "destination rows do not match coefficients"
-    );
-    for (row, &coefficient) in destinations.chunks_exact_mut(row_len).zip(coefficients) {
-        xor_scaled_bytes::<F>(row, coefficient, source);
-    }
+    crate::kernel::dispatch_butterfly!(F, fused_inverse_backend(low, high, coefficient));
 }
 
 #[cfg(test)]
@@ -630,13 +459,12 @@ mod tests {
     use super::*;
     use ::alloc::vec::Vec;
     use fgf::field::{Elem, Field};
+    use fgf::{FanPaar64, Gf8B, Gf16, Gf32};
 
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    /// Whether the host resolves to one of the tiers in `supported` — the
-    /// shared substitute for the crate's old `supported_on_host` /
-    /// `std::is_*_feature_detected!` test gates. Detection is single-source
-    /// (`simdispatch`), and `SIMD_BACKEND` is honored, so
-    /// `SIMD_BACKEND=scalar` also skips the SIMD kernel tests.
+    /// Whether the host resolves to one of the tiers in `supported`.
+    /// Detection is single-source (`simdispatch`) and `SIMD_BACKEND` is
+    /// honored, so `SIMD_BACKEND=scalar` also skips the SIMD kernel tests.
     fn host_supports(supported: &'static [Backend]) -> bool {
         simdispatch::Selection::new("SIMD_BACKEND")
             .supports(supported)
@@ -645,10 +473,9 @@ mod tests {
     }
 
     #[test]
+    // `backend()` and `backend_for::<Gf8B/Gf16>` always land on a tier
+    // the crate implements (or Scalar), never a backend without kernels.
     fn resolved_backend_is_in_supported_tiers() {
-        // The resolution contract: `backend()` and `backend_for::<Gf8B/Gf16>`
-        // always land on a tier the crate implements (or Scalar), never a
-        // backend it has no kernels for — the old `cap`-merging rot.
         assert!(BUTTERFLY_FFT_TIERS.contains(&backend()));
         assert!(Gf8B::BUTTERFLY_TIERS.contains(&backend_for::<Gf8B>()));
         assert!(Gf16::BUTTERFLY_TIERS.contains(&backend_for::<Gf16>()));
@@ -747,11 +574,11 @@ mod tests {
                         &mut expected_low[start..start + 2],
                         &mut expected_high[start..start + 2],
                     );
-                    let lo = Gf16::read(l);
-                    let hi = Gf16::read(h);
+                    let lo = Gf16::decode(l);
+                    let hi = Gf16::decode(h);
                     let new_low = lo.add(coefficient.mul(hi));
-                    Gf16::write(l, new_low);
-                    Gf16::write(h, hi.add(new_low));
+                    Gf16::encode(l, new_low);
+                    Gf16::encode(h, hi.add(new_low));
                 }
                 let (mut low, mut high) = (low, high);
                 scalar::fused_forward::<Gf16>(&mut low, &mut high, coefficient);
@@ -838,59 +665,6 @@ mod tests {
         check::<Gf16>();
     }
 
-    #[test]
-    fn xor_scaled_matches_element_math() {
-        fn check<F: ButterflyKernels>(coefficient: F::Elem) {
-            for len in lengths(F::BYTES) {
-                let src = pattern(0x19, len);
-                let mut dst = pattern(0xb3, len);
-                let mut expected = dst.clone();
-                for start in (0..expected.len()).step_by(F::BYTES) {
-                    let (out, input) = (
-                        &mut expected[start..start + F::BYTES],
-                        &src[start..start + F::BYTES],
-                    );
-                    let product = F::read(input).mul(coefficient);
-                    let acc = F::read(out).add(product);
-                    F::write(out, acc);
-                }
-                xor_scaled_bytes::<F>(&mut dst, coefficient, &src);
-                assert_eq!(dst, expected);
-            }
-        }
-        check::<Gf8B>(fgf::gf8b::Elem::from_raw(0x53));
-        check::<Gf8B>(fgf::gf8b::Elem::from_raw(0x00));
-        check::<Gf8B>(fgf::gf8b::Elem::from_raw(0x01));
-        check::<Gf16>(fgf::gf16::Elem::from_raw(0x9b37));
-        check::<Gf16>(fgf::gf16::Elem::from_raw(0x0000));
-        check::<Gf16>(fgf::gf16::Elem::from_raw(0x0001));
-    }
-
-    #[test]
-    fn xor_scaled_rows_match_element_math() {
-        fn check<F: ButterflyKernels>(coefficients: &[F::Elem]) {
-            let row_len = 3 * F::BYTES;
-            let source = pattern(0x31, row_len);
-            let mut destinations = pattern(0xc7, coefficients.len() * row_len);
-            let mut expected = destinations.clone();
-            for (row, &coefficient) in expected.chunks_exact_mut(row_len).zip(coefficients) {
-                for start in (0..row.len()).step_by(F::BYTES) {
-                    let (out, input) = (
-                        &mut row[start..start + F::BYTES],
-                        &source[start..start + F::BYTES],
-                    );
-                    let value = F::read(out).add(coefficient.mul(F::read(input)));
-                    F::write(out, value);
-                }
-            }
-            xor_scaled_bytes_rows::<F>(&mut destinations, row_len, coefficients, &source);
-            assert_eq!(destinations, expected);
-        }
-
-        check::<Gf8B>(&[0x00, 0x01, 0x53, 0xff].map(fgf::gf8b::Elem::from_raw));
-        check::<Gf16>(&[0x0000, 0x0001, 0x9b37, 0xffff].map(fgf::gf16::Elem::from_raw));
-    }
-
     /// Compare one concrete SIMD backend against the scalar reference in
     /// both directions independently. A round trip is insufficient because
     /// paired forward/inverse errors can cancel.
@@ -912,7 +686,7 @@ mod tests {
                 scalar::fused_forward::<F>(&mut expected_low, &mut expected_high, coefficient);
                 let mut actual_low = low.clone();
                 let mut actual_high = high.clone();
-                fused_forward_with::<F, B>(&mut actual_low, &mut actual_high, coefficient);
+                fused_forward_backend::<F, B>(&mut actual_low, &mut actual_high, coefficient);
                 assert_eq!(
                     actual_low, expected_low,
                     "{label} forward low diverged at len {len}"
@@ -927,7 +701,7 @@ mod tests {
                 scalar::fused_inverse::<F>(&mut expected_low, &mut expected_high, coefficient);
                 let mut actual_low = low;
                 let mut actual_high = high;
-                fused_inverse_with::<F, B>(&mut actual_low, &mut actual_high, coefficient);
+                fused_inverse_backend::<F, B>(&mut actual_low, &mut actual_high, coefficient);
                 assert_eq!(
                     actual_low, expected_low,
                     "{label} inverse low diverged at len {len}"
@@ -940,16 +714,68 @@ mod tests {
         }
     }
 
+    /// The trivial coefficients must also reach the SIMD kernels past the
+    /// public fast paths: `fused_forward_backend` intercepts zero and one
+    /// before the backend runs, so the ordinary differential loop never
+    /// exercises the kernels with them.
+    #[cfg(all(
+        feature = "simd",
+        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn differential_backend_trivial_coefficients<F: ButterflyKernels, B: ButterflyBackend<F>>(
+        label: &str,
+    ) {
+        for coefficient in [F::Elem::ZERO, F::Elem::ONE] {
+            for len in lengths(F::BYTES) {
+                let low = pattern(0x2e, len);
+                let high = pattern(0xd1, len);
+
+                let mut expected_low = low.clone();
+                let mut expected_high = high.clone();
+                scalar::fused_forward::<F>(&mut expected_low, &mut expected_high, coefficient);
+                let mut actual_low = low;
+                let mut actual_high = high;
+                B::forward_nonzero(&mut actual_low, &mut actual_high, coefficient);
+                assert_eq!(
+                    actual_low, expected_low,
+                    "{label} forward-zero/one low diverged at len {len}"
+                );
+                assert_eq!(
+                    actual_high, expected_high,
+                    "{label} forward-zero/one high diverged at len {len}"
+                );
+
+                let mut low = pattern(0x2e, len);
+                let mut high = pattern(0xd1, len);
+                let mut expected_low = low.clone();
+                let mut expected_high = high.clone();
+                scalar::fused_inverse::<F>(&mut expected_low, &mut expected_high, coefficient);
+                B::inverse_nonzero(&mut low, &mut high, coefficient);
+                assert_eq!(
+                    low, expected_low,
+                    "{label} inverse-zero/one low at len {len}"
+                );
+                assert_eq!(
+                    high, expected_high,
+                    "{label} inverse-zero/one high at len {len}"
+                );
+            }
+        }
+    }
+
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     fn differential_x86<F: ButterflyKernels>(coefficients: &[F::Elem]) {
         if host_supports(&[Backend::V3GfniCrypto]) {
             differential_backend::<F, GfniBackend<F>>("gfni", coefficients);
+            differential_backend_trivial_coefficients::<F, GfniBackend<F>>("gfni");
         }
         if host_supports(&[Backend::V3]) {
             differential_backend::<F, Avx2Backend<F>>("avx2", coefficients);
+            differential_backend_trivial_coefficients::<F, Avx2Backend<F>>("avx2");
         }
         if host_supports(&[Backend::V2]) {
             differential_backend::<F, Ssse3Backend<F>>("ssse3", coefficients);
+            differential_backend_trivial_coefficients::<F, Ssse3Backend<F>>("ssse3");
         }
     }
 
@@ -969,9 +795,11 @@ mod tests {
             "neon",
             &[0x00, 0x01, 0x02, 0x53, 0xff].map(fgf::gf8b::Elem::from_raw),
         );
+        differential_backend_trivial_coefficients::<Gf8B, NeonBackend<Gf8B>>("neon");
         differential_backend::<Gf16, NeonBackend<Gf16>>(
             "neon",
             &[0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fgf::gf16::Elem::from_raw),
         );
+        differential_backend_trivial_coefficients::<Gf16, NeonBackend<Gf16>>("neon");
     }
 }

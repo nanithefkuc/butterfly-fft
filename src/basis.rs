@@ -1,13 +1,11 @@
 //! Ordered field bases and coefficient-basis conversion.
 //!
-//! Two different things are called a "basis" here, and the module names them
-//! apart deliberately.
+//! Two different things are called a "basis" here, and the module names
+//! them apart deliberately.
 //!
-//! # Domain bases: ordered GF(2)-bases of the field
-//!
-//! An ordered basis `β = (β_0, …, β_{m-1})` fixes both the transform's
-//! evaluation points (point `i` is the XOR of the `β_j` at the set bits of
-//! `i`) and its subspace polynomials. Two providers ship:
+//! An ordered basis `β = (β_0, …, β_{m-1})` over GF(2) fixes both the
+//! transform's evaluation points (point `i` is the XOR of the `β_j` at the
+//! set bits of `i`) and its subspace polynomials. Two providers ship:
 //!
 //! - [`BitBasis`] — `β_i` is the element with bit pattern `1 << i`. Point
 //!   order is bit-pattern order; this is the default, and the layout every
@@ -22,9 +20,7 @@
 //! element's bit pattern *is* its bit-basis coordinate vector, so converting
 //! to any other ordered basis is one GF(2) matrix apply.
 //!
-//! # Coefficient bases: monomial ↔ novel
-//!
-//! [`crate::core`] speaks only the novel basis
+//! A transform plan consumes coefficients in the novel basis:
 //! `X_i(x) = ∏_j W̄_j(x)^{bit_j(i)}`. Interpolation-side consumers (GS
 //! weighted-degree bookkeeping, Hasse derivatives) work in the monomial
 //! basis. [`monomial_to_novel`] and [`novel_to_monomial`] convert between
@@ -36,24 +32,31 @@ mod gf2;
 
 use ::alloc::vec::Vec;
 
-use fgf::field::{Elem, Field};
+use fgf::field::Elem;
+
+use crate::kernel::ButterflyKernels;
 
 pub use cantor::CantorBasis;
 #[cfg(feature = "std")]
 pub use cantor::cantor_basis;
 pub use convert::{
-    conversion_scratch_elements, inverse_interpolate_bytes, monomial_to_novel,
-    monomial_to_novel_bytes, monomial_to_novel_with_scratch, novel_to_monomial,
-    novel_to_monomial_bytes, novel_to_monomial_with_scratch,
+    conversion_scratch_elements, interpolate_bytes_scratch, monomial_to_novel,
+    monomial_to_novel_bytes_scratch, monomial_to_novel_scratch, novel_to_monomial,
+    novel_to_monomial_bytes_scratch, novel_to_monomial_scratch,
 };
 
 pub(crate) use gf2::independent;
 
-/// An ordered GF(2)-basis of a field.
+/// An ordered GF(2)-basis of a binary extension field.
 ///
 /// Implementors expose `β_i` for `i < bits()`; a transform of dimension `k`
 /// consumes the prefix `β_0 … β_{k-1}`, whose span is the evaluation domain.
-pub trait OrderedBasis<F: Field>: Send + Sync {
+///
+/// The bound is [`ButterflyKernels`] because the coordinate algebra below
+/// reads the stable byte encoding as a GF(2) coordinate vector, which is a
+/// basis fact only in characteristic two; prime fields have no such basis
+/// here.
+pub trait OrderedBasis<F: ButterflyKernels>: Send + Sync {
     /// The `index`-th basis element `β_index`.
     ///
     /// # Panics
@@ -64,6 +67,8 @@ pub trait OrderedBasis<F: Field>: Send + Sync {
     fn bits(&self) -> usize;
 
     /// The prefix `β_0 … β_{count-1}`, the form plan constructors take.
+    ///
+    /// Allocates `count` elements.
     ///
     /// # Panics
     /// Panics if `count > bits()`.
@@ -82,7 +87,7 @@ pub trait OrderedBasis<F: Field>: Send + Sync {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BitBasis;
 
-impl<F: Field> OrderedBasis<F> for BitBasis {
+impl<F: ButterflyKernels> OrderedBasis<F> for BitBasis {
     #[inline]
     fn element(&self, index: usize) -> F::Elem {
         assert!(index < F::BITS as usize, "bit basis index out of range");
@@ -102,7 +107,7 @@ impl<F: Field> OrderedBasis<F> for BitBasis {
 /// solve. The bit basis is the identity map, which is what makes this the
 /// bit ↔ *anything* converter.
 #[derive(Clone, Debug)]
-pub struct CoordinateMap<F: Field> {
+pub struct CoordinateMap<F: ButterflyKernels> {
     /// Column `j` is the bit pattern of `β_j`: coordinates → element.
     forward: Vec<u64>,
     /// Column `b` holds the coordinates of the element with bit pattern
@@ -111,7 +116,7 @@ pub struct CoordinateMap<F: Field> {
     marker: ::core::marker::PhantomData<fn() -> F>,
 }
 
-impl<F: Field> CoordinateMap<F> {
+impl<F: ButterflyKernels> CoordinateMap<F> {
     /// Build the map for an ordered basis, given as its elements.
     ///
     /// Returns `None` unless `basis` is a full GF(2)-basis of the field:
@@ -138,7 +143,7 @@ impl<F: Field> CoordinateMap<F> {
     ///
     /// Returns `None` unless the provider offers a full basis of the field.
     #[must_use]
-    pub fn of(basis: &impl OrderedBasis<F>) -> Option<Self> {
+    pub fn from_basis(basis: &impl OrderedBasis<F>) -> Option<Self> {
         if basis.bits() != F::BITS as usize {
             return None;
         }
@@ -147,6 +152,9 @@ impl<F: Field> CoordinateMap<F> {
 
     /// The element with the given coordinates over this basis:
     /// `⊕_{j ∈ coordinates} β_j`.
+    ///
+    /// # Panics
+    /// Panics if `coordinates` sets a bit at or above the field's `BITS`.
     #[must_use]
     pub fn to_element(&self, coordinates: u64) -> F::Elem {
         gf2::elem_of::<F>(apply(&self.forward, coordinates))
@@ -176,8 +184,14 @@ fn apply(columns: &[u64], vector: u64) -> u64 {
 
 /// The transform point selected by `index` over an ordered basis: the XOR of
 /// the basis elements at the set bits of `index`.
+///
+/// A coset plan's points add their shift on top; see
+/// [`crate::transform::TransformPlan::point_element`].
+///
+/// # Panics
+/// Panics if `index` sets a bit at or above `basis.len()`.
 #[must_use]
-pub fn point_of<F: Field>(basis: &[F::Elem], index: usize) -> F::Elem {
+pub fn point_of<F: ButterflyKernels>(basis: &[F::Elem], index: usize) -> F::Elem {
     let mut element = F::Elem::ZERO;
     let mut remaining = index;
     while remaining != 0 {
@@ -194,8 +208,8 @@ mod tests {
     use super::*;
     use fgf::{FanPaar16, Gf8B, Gf16, Gf32, Gf64};
 
-    fn bit_basis_is_identity_map<F: Field>() {
-        let map = CoordinateMap::<F>::of(&BitBasis).expect("bit basis is a full basis");
+    fn bit_basis_is_identity_map<F: ButterflyKernels>() {
+        let map = CoordinateMap::<F>::from_basis(&BitBasis).expect("bit basis is a full basis");
         for bit in 0..F::BITS as usize {
             let pattern = 1u64 << bit;
             assert_eq!(gf2::bits_of::<F>(map.to_element(pattern)), pattern);
@@ -228,7 +242,7 @@ mod tests {
 
     #[test]
     fn point_of_matches_bit_pattern_under_the_bit_basis() {
-        fn check<F: Field>() {
+        fn check<F: ButterflyKernels>() {
             let basis: Vec<_> = (0..F::BITS as usize)
                 .map(|i| OrderedBasis::<F>::element(&BitBasis, i))
                 .collect();

@@ -193,15 +193,18 @@ impl<F: Field> FactorTable<F> {
     }
 }
 
-#[cfg(feature = "internals")]
 impl<F: Field> FactorTable<F> {
     /// Binary-heap twiddle values; index zero is unused.
+    // Reachable only through the `internals` facade.
+    #[allow(dead_code)]
     #[must_use]
     pub fn factors(&self) -> &[F::Elem] {
         &self.factors
     }
 
     /// Formal derivatives of the normalized subspace polynomials.
+    // Reachable only through the `internals` facade.
+    #[allow(dead_code)]
     #[must_use]
     pub fn derivative_factors(&self) -> &[F::Elem] {
         &self.derivative_factors
@@ -214,7 +217,7 @@ pub(crate) fn bit_basis_element<F: Field>(index: usize) -> F::Elem {
     debug_assert!(index < F::BITS as usize);
     let mut bytes = [0u8; 8];
     bytes[index / 8] = 1 << (index % 8);
-    F::read(&bytes[..F::BYTES])
+    F::decode(&bytes[..F::BYTES])
 }
 
 /// The first `count` bit-basis elements `β_0 … β_{count-1}`.
@@ -228,7 +231,7 @@ pub(crate) fn bit_basis<F: Field>(count: usize) -> Vec<F::Elem> {
 pub(crate) fn element_from_index<F: Field>(index: usize) -> F::Elem {
     let mut bytes = [0u8; 8];
     bytes[..F::BYTES].copy_from_slice(&index.to_le_bytes()[..F::BYTES]);
-    F::read(&bytes[..F::BYTES])
+    F::decode(&bytes[..F::BYTES])
 }
 
 /// The subspace points of `V_k` under the bit basis: elements with bit
@@ -248,7 +251,7 @@ pub(crate) fn linearly_independent<F: Field>(elements: &[F::Elem]) -> bool {
     let mut pivots: Vec<u128> = Vec::with_capacity(elements.len());
     for &element in elements {
         let mut bytes = [0u8; 16];
-        F::write(&mut bytes[..F::BYTES], element);
+        F::encode(&mut bytes[..F::BYTES], element);
         let mut vector = u128::from_le_bytes(bytes);
         for &pivot in &pivots {
             vector = vector.min(vector ^ pivot);
@@ -353,7 +356,7 @@ mod tests {
         *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let mut bytes = [0u8; 8];
         bytes[..F::BYTES].copy_from_slice(&state.to_le_bytes()[..F::BYTES]);
-        F::read(&bytes[..F::BYTES])
+        F::decode(&bytes[..F::BYTES])
     }
 
     /// The normalized-polynomial property the butterfly rests on: `W̄_d`

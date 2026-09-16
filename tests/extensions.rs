@@ -14,8 +14,8 @@
 use butterfly_fft::basis::{
     BitBasis, CantorBasis, CoordinateMap, OrderedBasis, monomial_to_novel, novel_to_monomial,
 };
-use butterfly_fft::core::transform::TransformPlan;
-use butterfly_fft::shifted::ShiftedPlan;
+use butterfly_fft::kernel::ButterflyKernels;
+use butterfly_fft::transform::TransformPlan;
 use fgf::field::{Elem, Field};
 use fgf::{Gf8B, Gf16};
 
@@ -30,7 +30,7 @@ impl Rng {
     }
 
     fn elem<F: Field>(&mut self) -> F::Elem {
-        F::read(&self.next_u64().to_le_bytes()[..F::BYTES])
+        F::decode(&self.next_u64().to_le_bytes()[..F::BYTES])
     }
 
     fn elems<F: Field>(&mut self, count: usize) -> Vec<F::Elem> {
@@ -50,8 +50,11 @@ fn horner<E: Elem>(coefficients: &[E], point: E) -> E {
 /// A random affine subspace: an independent direction basis of `dimension`
 /// elements plus a shift. Built by picking elements and rejecting dependent
 /// ones, so the directions are genuinely arbitrary — not a bit-basis prefix.
-fn random_subspace<F: Field>(rng: &mut Rng, dimension: usize) -> (Vec<F::Elem>, F::Elem) {
-    let map = CoordinateMap::<F>::of(&BitBasis).expect("bit basis is full");
+fn random_subspace<F: ButterflyKernels>(
+    rng: &mut Rng,
+    dimension: usize,
+) -> (Vec<F::Elem>, F::Elem) {
+    let map = CoordinateMap::<F>::from_basis(&BitBasis).expect("bit basis is full");
     let mut directions: Vec<F::Elem> = Vec::new();
     let mut spanned: Vec<u64> = Vec::new();
     while directions.len() < dimension {
@@ -72,21 +75,28 @@ fn random_subspace<F: Field>(rng: &mut Rng, dimension: usize) -> (Vec<F::Elem>, 
     (directions, rng.elem::<F>())
 }
 
+/// Sweep ceiling: the per-dimension `active` enumerations are quadratic in
+/// the size, so the miri run checks the same coset, truncation and basis
+/// classes at smaller dimensions.
+fn max_dimension(default: usize) -> usize {
+    if cfg!(miri) { default.min(4) } else { default }
+}
+
 /// **The acceptance scenario.** Evaluate a monomial-basis polynomial over an
 /// arbitrary affine subspace via convert → shifted forward.
-fn evaluate_over_affine_subspace<F: butterfly_fft::core::kernel::ButterflyKernels>(seed: u64) {
+fn evaluate_over_affine_subspace<F: butterfly_fft::kernel::ButterflyKernels>(seed: u64) {
     let mut rng = Rng(seed);
-    for dimension in 1..=7usize {
+    for dimension in 1..=max_dimension(7) {
         let size = 1 << dimension;
         let (directions, shift) = random_subspace::<F>(&mut rng, dimension);
-        let plan = ShiftedPlan::<F>::from_elements(size, &directions, shift).unwrap();
+        let plan = TransformPlan::<F>::with_shift(size, &directions, shift).unwrap();
 
         // deg < size, in the monomial basis.
         let monomial = rng.elems::<F>(size);
 
         // Convert over the coset's direction basis, then transform.
         let mut values = monomial.clone();
-        monomial_to_novel(&mut values, plan.plan()).unwrap();
+        monomial_to_novel(&mut values, &plan).unwrap();
         plan.forward(&mut values).unwrap();
 
         for (index, &value) in values.iter().enumerate() {
@@ -105,7 +115,7 @@ fn evaluate_over_affine_subspace<F: butterfly_fft::core::kernel::ButterflyKernel
         assert_eq!(points[0], shift);
         points.sort_unstable_by_key(|point| {
             let mut bytes = [0u8; 8];
-            F::write(&mut bytes[..F::BYTES], *point);
+            F::encode(&mut bytes[..F::BYTES], *point);
             u64::from_le_bytes(bytes)
         });
         points.dedup();
@@ -125,10 +135,10 @@ fn monomial_polynomial_over_an_arbitrary_affine_subspace() {
 #[test]
 fn truncated_forward_composes_with_a_shift() {
     let mut rng = Rng(0xcafe_f00d_1234_5678);
-    for dimension in 1..=6usize {
+    for dimension in 1..=max_dimension(6) {
         let size = 1 << dimension;
         let (directions, shift) = random_subspace::<Gf16>(&mut rng, dimension);
-        let plan = ShiftedPlan::<Gf16>::from_elements(size, &directions, shift).unwrap();
+        let plan = TransformPlan::<Gf16>::with_shift(size, &directions, shift).unwrap();
         let row_len = 2;
 
         for active in 1..=size {
@@ -139,7 +149,7 @@ fn truncated_forward_composes_with_a_shift() {
             // exactly the first `active` slots: the novel basis is degree
             // triangular.
             let mut novel = monomial.clone();
-            monomial_to_novel(&mut novel, plan.plan()).unwrap();
+            monomial_to_novel(&mut novel, &plan).unwrap();
             assert!(
                 novel[active..].iter().all(|value| value.is_zero()),
                 "novel tail not zero for active {active}"
@@ -147,13 +157,13 @@ fn truncated_forward_composes_with_a_shift() {
 
             let mut rows = vec![0u8; size * row_len];
             for (index, &value) in novel.iter().enumerate() {
-                <Gf16 as Field>::write(&mut rows[index * row_len..][..row_len], value);
+                <Gf16 as Field>::encode(&mut rows[index * row_len..][..row_len], value);
             }
-            plan.forward_bytes_trunc_range(&mut rows, row_len, active, 0..size)
+            plan.forward_bytes_truncated_range(&mut rows, row_len, active, 0..size)
                 .unwrap();
 
             for index in 0..size {
-                let value = <Gf16 as Field>::read(&rows[index * row_len..][..row_len]);
+                let value = <Gf16 as Field>::decode(&rows[index * row_len..][..row_len]);
                 assert_eq!(
                     value,
                     horner(&monomial, plan.point_element(index)),
@@ -168,10 +178,10 @@ fn truncated_forward_composes_with_a_shift() {
 #[test]
 fn coset_interpolation_recovers_monomial_coefficients() {
     let mut rng = Rng(0x0bad_c0de_dead_10cc);
-    for dimension in 1..=7usize {
+    for dimension in 1..=max_dimension(7) {
         let size = 1 << dimension;
         let (directions, shift) = random_subspace::<Gf16>(&mut rng, dimension);
-        let plan = ShiftedPlan::<Gf16>::from_elements(size, &directions, shift).unwrap();
+        let plan = TransformPlan::<Gf16>::with_shift(size, &directions, shift).unwrap();
 
         let monomial = rng.elems::<Gf16>(size);
         let mut values: Vec<_> = (0..size)
@@ -179,7 +189,7 @@ fn coset_interpolation_recovers_monomial_coefficients() {
             .collect();
 
         plan.inverse(&mut values).unwrap();
-        novel_to_monomial(&mut values, plan.plan()).unwrap();
+        novel_to_monomial(&mut values, &plan).unwrap();
         assert_eq!(values, monomial, "dimension {dimension}");
     }
 }
@@ -190,7 +200,7 @@ fn coset_interpolation_recovers_monomial_coefficients() {
 fn cantor_domain_basis_behaves_like_any_other() {
     let cantor = CantorBasis::<Gf16>::build().unwrap();
     let mut rng = Rng(0x5eed_5eed_5eed_5eed);
-    for dimension in 1..=8usize {
+    for dimension in 1..=max_dimension(8) {
         let size = 1 << dimension;
         let plan = TransformPlan::<Gf16>::with_basis(size, &cantor.prefix(dimension)).unwrap();
 
@@ -209,16 +219,16 @@ fn cantor_domain_basis_behaves_like_any_other() {
 #[test]
 fn change_of_basis_matrices_invert() {
     let cantor8 = CantorBasis::<Gf8B>::build().unwrap();
-    let map = CoordinateMap::<Gf8B>::of(&cantor8).unwrap();
+    let map = CoordinateMap::<Gf8B>::from_basis(&cantor8).unwrap();
     for pattern in 0..256u64 {
-        let element = <Gf8B as Field>::read(&pattern.to_le_bytes()[..1]);
+        let element = <Gf8B as Field>::decode(&pattern.to_le_bytes()[..1]);
         assert_eq!(map.to_element(map.to_coordinates(element)), element);
         let coordinates = pattern;
         assert_eq!(map.to_coordinates(map.to_element(coordinates)), coordinates);
     }
 
     let cantor16 = CantorBasis::<Gf16>::build().unwrap();
-    let map = CoordinateMap::<Gf16>::of(&cantor16).unwrap();
+    let map = CoordinateMap::<Gf16>::from_basis(&cantor16).unwrap();
     let mut rng = Rng(0xa5a5_5a5a_a5a5_5a5a);
     for _ in 0..2048 {
         let element = rng.elem::<Gf16>();

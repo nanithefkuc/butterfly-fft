@@ -3,11 +3,11 @@
 > to check for regressions, things may break. Audit the code yourself, or with
 > your own agent before using.
 
-# butterfly-fft - Additive Fast Fourier Transforms
+# butterfly-fft — Additive FFT and NTT over Finite Fields
 
-`butterfly-fft` provides reusable additive-FFT plans, basis conversion, affine
-coset execution, and runtime-dispatched butterfly kernels over binary finite
-fields.
+`butterfly-fft` provides reusable additive-FFT plans over binary fields,
+multiplicative NTT plans over prime and prime-extension fields, basis
+conversion, affine-coset execution, and runtime-dispatched butterfly kernels.
 
 The crate owns transform mathematics, transform-buffer layouts, factor tables,
 and butterfly kernels. [`fgf`](https://github.com/nanithefkuc/fgf) owns field
@@ -16,7 +16,8 @@ codec shells, and evaluation-point-to-wire-index mappings.
 
 ## Usage
 
-The MSRV is Rust 1.89, edition 2024.
+The MSRV is Rust 1.93, edition 2024. Field arithmetic uses `fgf` 1.0.0 from
+crates.io.
 
 `butterfly-fft` is distributed through git only; it is not published to
 [crates.io](https://crates.io).
@@ -48,8 +49,8 @@ butterfly-fft = { git = "https://github.com/nanithefkuc/butterfly-fft", default-
 
 | Platform | Result |
 | --- | --- |
-| x86/x86_64 | GFNI/AVX2/SSSE3 butterfly dispatch for GF(2^8) and GF(2^16) |
-| AArch64 | NEON butterfly dispatch for GF(2^8) and GF(2^16) |
+| `x86`/`x86_64` | GFNI/AVX2/SSSE3 butterfly dispatch for GF(2^8) and GF(2^16) |
+| `AArch64` | NEON butterfly dispatch for GF(2^8) and GF(2^16) |
 | wasm32 and other targets | portable scalar butterflies |
 | wider `fgf` fields | portable scalar butterflies |
 
@@ -59,15 +60,15 @@ A plan is built once for a field and power-of-two domain size, then reused.
 Element transforms operate in place and do not allocate:
 
 ```rust
-use butterfly_fft::core::transform::TransformPlan;
+use butterfly_fft::TransformPlan;
 use fgf::{Gf16, gf16};
 
 let plan = TransformPlan::<Gf16>::new(4).expect("valid transform plan");
 let mut values = [
-    gf16::Elem(0x1234),
-    gf16::Elem(0xabcd),
-    gf16::Elem(0x0108),
-    gf16::Elem(0xffff),
+    gf16::Elem::from_raw(0x1234),
+    gf16::Elem::from_raw(0xabcd),
+    gf16::Elem::from_raw(0x0108),
+    gf16::Elem::from_raw(0xffff),
 ];
 let coefficients = values;
 
@@ -81,16 +82,19 @@ in place, allowing the butterfly kernels to process independent columns at
 vector width:
 
 ```rust
-use butterfly_fft::core::transform::TransformPlan;
+use butterfly_fft::TransformPlan;
 use fgf::Gf16;
 
-let plan = TransformPlan::<Gf16>::shared(256).expect("valid shared plan");
-let mut rows = vec![0u8; 256 * 4096];
-plan.forward_bytes(&mut rows, 4096)
+let plan = TransformPlan::<Gf16>::new(16).expect("valid transform plan");
+let mut rows = vec![0u8; 16 * 64];
+plan.forward_bytes(&mut rows, 64)
     .expect("valid byte-row geometry");
-plan.inverse_bytes(&mut rows, 4096)
+plan.inverse_bytes(&mut rows, 64)
     .expect("valid byte-row geometry");
 ```
+
+With the `std` feature, `TransformPlan::shared` caches one plan per field and
+size process-wide, and `PlanCache` holds an owned, droppable cache.
 
 Byte-row APIs reject zero row lengths, partial elements, and checked-geometry
 overflows before execution. Restricted selected, range, and truncated walkers
@@ -101,12 +105,11 @@ values.
 
 | Module | Result |
 | --- | --- |
-| `core::transform` | [`TransformPlan`] forward, inverse, derivative, selected-output, range, truncated, and high-coset execution |
-| `core::factors` | subspace twiddle and derivative factor tables |
-| `core::kernel` | fused butterfly kernels and runtime SIMD dispatch |
-| `basis` | [`BitBasis`], [`CantorBasis`], [`CoordinateMap`], and monomial/novel conversion |
-| `shifted` | [`ShiftedPlan`] execution over affine cosets `α + V` |
-| `ntt` | `NttPlan` radix-two multiplicative (number-theoretic) transforms over prime and prime-extension fields |
+| `transform` | [`TransformPlan`] forward, inverse, derivative, selected-output, range, truncated, and high-coset execution |
+| `internals` | unstable factor tables and tuning schedules (feature-gated) |
+| `kernel` | fused butterfly kernels and runtime SIMD dispatch |
+| `basis` | [`basis::BitBasis`], [`basis::CantorBasis`], [`basis::CoordinateMap`], and monomial/novel conversion |
+| `ntt` | [`NttPlan`] radix-two multiplicative (number-theoretic) transforms over prime and prime-extension fields |
 
 ## Building
 
@@ -122,18 +125,18 @@ cargo doc --all-features --no-deps
 
 ## Backends
 
-`core::kernel::backend()` reports the process-wide backend. The backend ladder
+`kernel::backend()` reports the process-wide backend. The backend ladder
 and downgrade-only `SIMD_BACKEND` override come from
 [`simdispatch`](https://github.com/nanithefkuc/simdispatch). The supported
-ordering is exposed as `core::kernel::BUTTERFLY_FFT_TIERS`.
+ordering is exposed as `kernel::BUTTERFLY_FFT_TIERS`.
 
 | Identifier | Target and requirements | Butterfly lane width |
 | --- | --- | --- |
 | `v3_gfni_crypto` | x86 AVX2 + GFNI + crypto | 32 bytes |
 | `v3` | x86 AVX2 shuffle | 32 bytes |
 | `v2` | x86 SSSE3/SSE4.2 shuffle | 16 bytes |
-| `neon_aes` | AArch64 NEON + AES/PMULL | 16 bytes |
-| `neon` | AArch64 NEON split-nibble shuffle | 16 bytes |
+| `neon_aes` | `AArch64` NEON + AES/PMULL | 16 bytes |
+| `neon` | `AArch64` NEON split-nibble shuffle | 16 bytes |
 | `scalar` | portable fallback | scalar |
 
 `SIMD_BACKEND=v3_gfni_crypto|v3|v2|neon_aes|neon|scalar` requests a backend at
@@ -142,9 +145,13 @@ ignored. Backends are re-exported from `simdispatch`.
 
 ## Benchmarks
 
-The `benchmarks/afft` project contains a standalone raw-transform
-harness comparing `butterfly-fft` with external AFFT engines. It requires `git`,
-network access, and a working C/C++ toolchain.
+`BENCHMARKS.md` records the pinned measurements for the public transform
+shapes, the derivative-schedule crossovers, and the in-process competitor
+comparison on the project's benchmark hosts.
+
+The `benchmarks/afft` project contains the standalone raw-transform harness
+behind the competitor matrix. It requires `git`, network access, and a working
+C/C++ toolchain:
 
 ```sh
 cargo bench --manifest-path benchmarks/afft/Cargo.toml --bench raw_afft -- p32_r64 --test
@@ -153,4 +160,4 @@ BUTTERFLY_FFT_BENCH_MAX_BYTES=67108864 cargo bench --manifest-path benchmarks/af
 
 ## License
 
-MIT - see [LICENSE](LICENSE)
+MIT - see [LICENSE](https://github.com/nanithefkuc/butterfly-fft/blob/main/LICENSE)

@@ -7,6 +7,8 @@ const LEOPARD_REPOSITORY: &str = "https://github.com/catid/leopard.git";
 const LEOPARD_REVISION: &str = "6e5725ebdf9da4370b0bcc4f70fa8eb66f4e6198";
 const NANORS_REPOSITORY: &str = "https://github.com/sleepybishop/nanors.git";
 const NANORS_REVISION: &str = "593cba13a3db85bcaa9570c61c3aa50cfdd64ccd";
+const FASTECC_REPOSITORY: &str = "https://github.com/Bulat-Ziganshin/FastECC.git";
+const FASTECC_REVISION: &str = "b8ca7db6bf5556185c96009b161e8aec82af734e";
 
 fn command_output(command: &mut Command, description: &str) -> Output {
     let output = command
@@ -112,6 +114,24 @@ fn compile_nanors(manifest: &Path, source: &Path) {
         .compile("butterfly_fft_nanors_adapter");
 }
 
+fn compile_fastecc(manifest: &Path, source: &Path) {
+    let mut build = cc::Build::new();
+    build
+        .cpp(true)
+        .std("c++17")
+        .opt_level(3)
+        .warnings(false)
+        .include(source)
+        .define("SIMD", "AVX2")
+        .file(manifest.join("native/fastecc_adapter.cpp"));
+
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("target architecture");
+    if matches!(target_arch.as_str(), "x86" | "x86_64") {
+        build.flag_if_supported("-mavx2");
+    }
+    build.compile("butterfly_fft_fastecc_adapter");
+}
+
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
     let upstream = manifest.join(".upstream");
@@ -119,11 +139,14 @@ fn main() {
 
     println!("cargo:rerun-if-changed=native/leopard_adapter.cpp");
     println!("cargo:rerun-if-changed=native/nanors_adapter.c");
+    println!("cargo:rerun-if-changed=native/fastecc_adapter.cpp");
     println!("cargo:rerun-if-changed=build.rs");
 
     let leopard = checkout(&upstream, "leopard", LEOPARD_REPOSITORY, LEOPARD_REVISION);
     let nanors = checkout(&upstream, "nanors", NANORS_REPOSITORY, NANORS_REVISION);
+    let fastecc = checkout(&upstream, "FastECC", FASTECC_REPOSITORY, FASTECC_REVISION);
 
     compile_leopard(&manifest, &leopard);
     compile_nanors(&manifest, &nanors);
+    compile_fastecc(&manifest, &fastecc);
 }

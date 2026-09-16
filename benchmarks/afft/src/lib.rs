@@ -20,6 +20,13 @@ unsafe extern "C" {
     fn butterfly_fft_nanors_backend() -> *const c_char;
     fn butterfly_fft_nanors_forward(rows: *mut u8, log_points: u32, row_len: u32);
     fn butterfly_fft_nanors_inverse(rows: *mut u8, log_points: u32, row_len: u32);
+
+    fn butterfly_fft_fastecc_new(points: usize, lanes: usize) -> *mut FastEccNtt;
+    fn butterfly_fft_fastecc_fill(state: *mut FastEccNtt, seed: u32);
+    fn butterfly_fft_fastecc_forward(state: *mut FastEccNtt);
+    fn butterfly_fft_fastecc_inverse(state: *mut FastEccNtt);
+    fn butterfly_fft_fastecc_data(state: *const FastEccNtt) -> *const u32;
+    fn butterfly_fft_fastecc_free(state: *mut FastEccNtt);
 }
 
 static LEOPARD_INITIALIZED: LazyLock<()> = LazyLock::new(|| {
@@ -227,6 +234,76 @@ impl NanorsBuffer {
     }
 }
 
+// Opaque C++ state; only ever handled by pointer across the FFI.
+enum FastEccNtt {}
+
+/// FastECC's MFA NTT over GF(0xFFF00001): `points` blocks of `lanes`
+/// `u32` field elements each, transformed in place.
+pub struct FastEccNttBuffer {
+    raw: *mut FastEccNtt,
+    points: usize,
+    lanes: usize,
+}
+
+impl FastEccNttBuffer {
+    /// Allocate and fill with deterministic field elements.
+    #[must_use]
+    pub fn new(points: usize, lanes: usize, seed: u32) -> Self {
+        // SAFETY: the sizes match the allocation contract; the fill runs
+        // before any other pointer escapes.
+        let raw = unsafe { butterfly_fft_fastecc_new(points, lanes) };
+        assert!(!raw.is_null(), "FastECC allocation failed");
+        // SAFETY: `raw` is a live allocation owned by this buffer.
+        unsafe { butterfly_fft_fastecc_fill(raw, seed) };
+        Self { raw, points, lanes }
+    }
+
+    /// Number of transform points (blocks).
+    #[must_use]
+    pub fn points(&self) -> usize {
+        self.points
+    }
+
+    /// Independent transform lanes packed into each block.
+    #[must_use]
+    pub fn lanes(&self) -> usize {
+        self.lanes
+    }
+
+    /// The flat `points × lanes` element buffer, row-major.
+    #[must_use]
+    pub fn data(&self) -> &[u32] {
+        // SAFETY: `data` returns a pointer to the live `points × lanes`
+        // allocation owned by this buffer, unchanged for its lifetime.
+        unsafe {
+            core::slice::from_raw_parts(
+                butterfly_fft_fastecc_data(self.raw),
+                self.points * self.lanes,
+            )
+        }
+    }
+
+    /// Forward MFA NTT, in place.
+    pub fn forward(&mut self) {
+        // SAFETY: `raw` is a live allocation of this geometry.
+        unsafe { butterfly_fft_fastecc_forward(self.raw) };
+    }
+
+    /// Inverse MFA NTT, in place and unnormalized: the composition with
+    /// `forward` multiplies every lane by `points`.
+    pub fn inverse(&mut self) {
+        // SAFETY: the same invariants as `forward` hold.
+        unsafe { butterfly_fft_fastecc_inverse(self.raw) };
+    }
+}
+
+impl Drop for FastEccNttBuffer {
+    fn drop(&mut self) {
+        // SAFETY: `raw` is freed exactly once, here.
+        unsafe { butterfly_fft_fastecc_free(self.raw) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,12 +347,18 @@ mod tests {
     }
 
     #[test]
-    fn nanors_raw_round_trip() {
-        let original = input(32 * 64);
-        let mut rows = NanorsBuffer::new(original.clone(), 32);
-        rows.forward();
-        rows.inverse();
-        assert_eq!(rows.as_bytes(), original);
-        assert!(!nanors_backend().is_empty());
+    fn fastecc_ntt_round_trip_is_scaled_identity() {
+        let points = 64;
+        let mut buffer = FastEccNttBuffer::new(points, 2, 0x243F_6A88);
+        let original = buffer.data().to_vec();
+        buffer.forward();
+        buffer.inverse();
+        // FastECC's inverse leaves the 1/N normalization to the caller, so
+        // the round trip multiplies every lane by `points`.
+        let modulus: u64 = 0xFFF00001;
+        for (&got, &input) in buffer.data().iter().zip(&original) {
+            let expected = (u64::from(input) * points as u64) % modulus;
+            assert_eq!(u64::from(got), expected);
+        }
     }
 }

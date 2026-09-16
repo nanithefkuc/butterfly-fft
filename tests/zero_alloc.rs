@@ -10,10 +10,10 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use butterfly_fft::basis::{
-    conversion_scratch_elements, monomial_to_novel_bytes, monomial_to_novel_with_scratch,
-    novel_to_monomial_bytes, novel_to_monomial_with_scratch,
+    conversion_scratch_elements, monomial_to_novel_bytes_scratch, monomial_to_novel_scratch,
+    novel_to_monomial_bytes_scratch, novel_to_monomial_scratch,
 };
-use butterfly_fft::core::transform::TransformPlan;
+use butterfly_fft::transform::TransformPlan;
 use fgf::{Gf8B, Gf16};
 
 struct Counting;
@@ -58,7 +58,7 @@ fn count_allocations(body: impl FnOnce()) -> usize {
     ALLOCATIONS.load(Ordering::Relaxed)
 }
 
-fn check_field<F: butterfly_fft::core::kernel::ButterflyKernels>(log_size: usize, row_len: usize) {
+fn check_field<F: butterfly_fft::kernel::ButterflyKernels>(log_size: usize, row_len: usize) {
     let plan = TransformPlan::<F>::new(1 << log_size).expect("valid plan");
     let mut rows = vec![0x5Au8; plan.size() * row_len];
     let mut derivative = vec![0u8; rows.len()];
@@ -75,17 +75,20 @@ fn check_field<F: butterfly_fft::core::kernel::ButterflyKernels>(log_size: usize
     let allocations = count_allocations(|| {
         plan.forward_bytes(&mut rows, row_len).unwrap();
         plan.inverse_bytes(&mut rows, row_len).unwrap();
-        plan.derivative_bytes(&rows, row_len, &mut derivative)
+        plan.derivative_into_bytes(&mut derivative, row_len, &rows)
             .unwrap();
         plan.derivative_plus_identity_bytes(&mut derivative, row_len)
             .unwrap();
         plan.forward(&mut values).unwrap();
         plan.inverse(&mut values).unwrap();
-        plan.derivative(&values, &mut element_derivative).unwrap();
-        novel_to_monomial_with_scratch(&mut values, &plan, &mut conversion_scratch).unwrap();
-        monomial_to_novel_with_scratch(&mut values, &plan, &mut conversion_scratch).unwrap();
-        novel_to_monomial_bytes(&mut rows, row_len, &plan, &mut conversion_byte_scratch).unwrap();
-        monomial_to_novel_bytes(&mut rows, row_len, &plan, &mut conversion_byte_scratch).unwrap();
+        plan.derivative_into(&mut element_derivative, &values)
+            .unwrap();
+        novel_to_monomial_scratch(&mut values, &plan, &mut conversion_scratch).unwrap();
+        monomial_to_novel_scratch(&mut values, &plan, &mut conversion_scratch).unwrap();
+        novel_to_monomial_bytes_scratch(&mut rows, row_len, &plan, &mut conversion_byte_scratch)
+            .unwrap();
+        monomial_to_novel_bytes_scratch(&mut rows, row_len, &plan, &mut conversion_byte_scratch)
+            .unwrap();
     });
 
     assert_eq!(
@@ -96,14 +99,57 @@ fn check_field<F: butterfly_fft::core::kernel::ButterflyKernels>(log_size: usize
     );
 }
 
+fn check_ntt<F: fgf::kernel::FieldKernels>(size: usize, lanes: usize) {
+    let plan = butterfly_fft::ntt::NttPlan::<F>::new(size).expect("valid plan");
+    let row_len = lanes * F::BYTES;
+    let mut rows = vec![0x5Au8; size * row_len];
+    let mut scratch = plan.scratch(row_len).expect("scratch");
+    // Warm backend resolution and the plan's lazy state.
+    plan.forward_bytes_scratch(&mut rows, row_len, &mut scratch)
+        .expect("warm forward");
+
+    let allocations = count_allocations(|| {
+        plan.forward_bytes_scratch(&mut rows, row_len, &mut scratch)
+            .expect("forward");
+        plan.inverse_bytes_scratch(&mut rows, row_len, &mut scratch)
+            .expect("inverse");
+    });
+
+    assert_eq!(
+        allocations,
+        0,
+        "{} NTT size {size} lanes {lanes} allocated during execution",
+        F::NAME
+    );
+}
+
 /// One test per binary: the global arming flag is not thread-safe against a
 /// second concurrently running test, so every check runs here in order.
 #[test]
 fn execution_allocates_nothing() {
-    check_field::<Gf16>(10, 64);
-    check_field::<Gf16>(3, 1_024);
-    check_field::<Gf16>(1, 2);
-    check_field::<Gf8B>(8, 33);
-    check_field::<Gf8B>(3, 65_536);
-    check_field::<Gf8B>(0, 1);
+    // Under miri the magnitudes shrink — the contract is the allocation
+    // count, not the transform size, and every row-geometry class
+    // (multi-element rows, partial-element tails, huge single rows) stays
+    // represented.
+    if cfg!(miri) {
+        check_field::<Gf16>(4, 64);
+        check_field::<Gf16>(3, 1_024);
+        check_field::<Gf16>(1, 2);
+        check_field::<Gf8B>(4, 33);
+        check_field::<Gf8B>(3, 4_096);
+        check_field::<Gf8B>(0, 1);
+        check_ntt::<fgf::Goldilocks>(8, 1);
+        check_ntt::<fgf::Goldilocks>(8, 4);
+        check_ntt::<fgf::QuadMersenne31>(8, 2);
+    } else {
+        check_field::<Gf16>(10, 64);
+        check_field::<Gf16>(3, 1_024);
+        check_field::<Gf16>(1, 2);
+        check_field::<Gf8B>(8, 33);
+        check_field::<Gf8B>(3, 65_536);
+        check_field::<Gf8B>(0, 1);
+        check_ntt::<fgf::Goldilocks>(64, 1);
+        check_ntt::<fgf::Goldilocks>(64, 16);
+        check_ntt::<fgf::QuadMersenne31>(64, 4);
+    }
 }

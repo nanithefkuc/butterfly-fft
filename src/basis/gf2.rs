@@ -15,7 +15,7 @@ use fgf::field::{Elem, Field};
 pub(crate) fn bits_of<F: Field>(value: F::Elem) -> u64 {
     debug_assert!(F::BYTES <= 8);
     let mut bytes = [0u8; 8];
-    F::write(&mut bytes[..F::BYTES], value);
+    F::encode(&mut bytes[..F::BYTES], value);
     u64::from_le_bytes(bytes)
 }
 
@@ -23,7 +23,7 @@ pub(crate) fn bits_of<F: Field>(value: F::Elem) -> u64 {
 pub(crate) fn elem_of<F: Field>(bits: u64) -> F::Elem {
     debug_assert!(F::BYTES <= 8);
     let bytes = bits.to_le_bytes();
-    F::read(&bytes[..F::BYTES])
+    F::decode(&bytes[..F::BYTES])
 }
 
 /// A GF(2) linear system in reduced form, solved by XOR elimination.

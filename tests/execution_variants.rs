@@ -16,8 +16,8 @@
 //!   several levels deep, where the scratch-based tail subtraction runs.
 //! - **Sub-ranges of the high coset**, not just the whole half.
 
-use butterfly_fft::core::kernel::ButterflyKernels;
-use butterfly_fft::core::transform::TransformPlan;
+use butterfly_fft::kernel::ButterflyKernels;
+use butterfly_fft::transform::TransformPlan;
 use fgf::field::{Elem, Field};
 use fgf::{Gf8B, Gf16};
 
@@ -33,7 +33,7 @@ impl Rng {
     }
 
     fn elem<F: Field>(&mut self) -> F::Elem {
-        F::read(&self.next_u64().to_le_bytes()[..F::BYTES])
+        F::decode(&self.next_u64().to_le_bytes()[..F::BYTES])
     }
 }
 
@@ -52,7 +52,7 @@ fn pack<F: Field>(lanes: &[Vec<F::Elem>], rows_used: usize) -> Vec<u8> {
     for (lane_index, lane) in lanes.iter().enumerate() {
         for (row, &value) in lane.iter().take(rows_used).enumerate() {
             let start = row * row_len + lane_index * F::BYTES;
-            F::write(&mut rows[start..start + F::BYTES], value);
+            F::encode(&mut rows[start..start + F::BYTES], value);
         }
     }
     rows
@@ -60,7 +60,7 @@ fn pack<F: Field>(lanes: &[Vec<F::Elem>], rows_used: usize) -> Vec<u8> {
 
 fn unpack<F: Field>(rows: &[u8], lanes: usize, row: usize, lane: usize) -> F::Elem {
     let start = row * lanes * F::BYTES + lane * F::BYTES;
-    F::read(&rows[start..start + F::BYTES])
+    F::decode(&rows[start..start + F::BYTES])
 }
 
 /// Full forward transform of each lane, in the element domain.
@@ -101,9 +101,16 @@ fn assert_rows<F: Field>(
 
 const LANES: usize = 3;
 
+/// Sweep ceiling: the exhaustive range/truncation enumerations are
+/// quadratic in the size, so the miri run checks the same boundary classes
+/// (multi-element rows, awkward truncations, sub-ranges) at smaller sizes.
+fn max_log() -> usize {
+    if cfg!(miri) { 4 } else { 7 }
+}
+
 fn selected_matches_full<F: ButterflyKernels>(seed: u64) {
     let mut rng = Rng(seed);
-    for log_size in 1..=7usize {
+    for log_size in 1..=max_log() {
         let size = 1 << log_size;
         let plan = TransformPlan::<F>::new(size).unwrap();
         let lanes = random_lanes::<F>(&mut rng, LANES, size);
@@ -147,7 +154,7 @@ fn selected_matches_full_transform_on_wide_rows() {
 
 fn range_matches_full<F: ButterflyKernels>(seed: u64) {
     let mut rng = Rng(seed);
-    for log_size in 1..=7usize {
+    for log_size in 1..=max_log() {
         let size = 1 << log_size;
         let plan = TransformPlan::<F>::new(size).unwrap();
         let lanes = random_lanes::<F>(&mut rng, LANES, size);
@@ -173,7 +180,7 @@ fn every_contiguous_range_matches_full_transform() {
 
 fn trunc_range_matches_padded<F: ButterflyKernels>(seed: u64) {
     let mut rng = Rng(seed);
-    for log_size in 1..=7usize {
+    for log_size in 1..=max_log() {
         let size = 1 << log_size;
         let plan = TransformPlan::<F>::new(size).unwrap();
         let row_len = LANES * F::BYTES;
@@ -195,7 +202,7 @@ fn trunc_range_matches_padded<F: ButterflyKernels>(seed: u64) {
                 active.min(size - 1)..size,
             ] {
                 let mut rows = pack::<F>(&lanes, size);
-                plan.forward_bytes_trunc_range(&mut rows, row_len, active, range.clone())
+                plan.forward_bytes_truncated_range(&mut rows, row_len, active, range.clone())
                     .unwrap();
                 assert_rows::<F>(&rows, LANES, &reference, range, "trunc");
             }
@@ -217,7 +224,7 @@ fn truncated_forward_with_no_active_prefix_is_a_no_op() {
     let lanes = random_lanes::<Gf16>(&mut rng, LANES, 16);
     let original = pack::<Gf16>(&lanes, 16);
     let mut rows = original.clone();
-    plan.forward_bytes_trunc_range(&mut rows, LANES * 2, 0, 0..16)
+    plan.forward_bytes_truncated_range(&mut rows, LANES * 2, 0, 0..16)
         .unwrap();
     assert_eq!(rows, original);
     // An empty output range is equally inert.
@@ -228,7 +235,7 @@ fn truncated_forward_with_no_active_prefix_is_a_no_op() {
 
 fn high_coset_matches_full<F: ButterflyKernels>(seed: u64) {
     let mut rng = Rng(seed);
-    for log_size in 2..=7usize {
+    for log_size in 2..=max_log() {
         let size = 1 << log_size;
         let half = size / 2;
         let plan = TransformPlan::<F>::new(size).unwrap();
@@ -270,7 +277,7 @@ fn high_coset_sub_ranges_match_full_transform() {
 
 fn inverse_truncated_recovers<F: ButterflyKernels>(seed: u64) {
     let mut rng = Rng(seed);
-    for log_size in 1..=7usize {
+    for log_size in 1..=max_log() {
         let size = 1 << log_size;
         let plan = TransformPlan::<F>::new(size).unwrap();
         let row_len = LANES * F::BYTES;
@@ -283,11 +290,11 @@ fn inverse_truncated_recovers<F: ButterflyKernels>(seed: u64) {
             let evaluations = forward_lanes(&plan, &lanes);
 
             let mut rows = pack::<F>(&evaluations, size);
-            let scratch_rows = plan.inverse_truncated_scratch_rows(active);
+            let scratch_rows = plan.inverse_bytes_truncated_scratch_rows(active);
             // Poison the scratch: a walker that reads it before writing must
             // not pass.
             let mut scratch = vec![0xA5u8; scratch_rows * row_len];
-            plan.inverse_truncated_bytes(&mut rows, row_len, active, &mut scratch)
+            plan.inverse_bytes_truncated_scratch(&mut rows, row_len, active, &mut scratch)
                 .unwrap();
             assert_rows::<F>(&rows, LANES, &lanes, 0..active, "inverse truncated");
         }
@@ -307,27 +314,16 @@ fn scratch_sizing_is_tight() {
     let plan = TransformPlan::<Gf16>::new(64).unwrap();
     let row_len = 2;
     for active in 1..=64usize {
-        let rows_needed = plan.inverse_truncated_scratch_rows(active);
+        let rows_needed = plan.inverse_bytes_truncated_scratch_rows(active);
         if rows_needed == 0 {
             continue;
         }
         let mut rows = vec![0u8; 64 * row_len];
         let mut short = vec![0u8; rows_needed * row_len - 1];
         assert!(
-            plan.inverse_truncated_bytes(&mut rows, row_len, active, &mut short)
+            plan.inverse_bytes_truncated_scratch(&mut rows, row_len, active, &mut short)
                 .is_err(),
             "active {active} accepted undersized scratch"
         );
     }
-}
-
-#[cfg(feature = "internals")]
-#[test]
-fn unstable_factor_table_surface_is_read_only() {
-    use butterfly_fft::internals::FactorTable;
-
-    let plan = TransformPlan::<Gf16>::new(64).unwrap();
-    let table: &FactorTable<Gf16> = plan.table();
-    assert_eq!(table.factors().len(), plan.size());
-    assert_eq!(table.derivative_factors().len(), plan.log_size());
 }

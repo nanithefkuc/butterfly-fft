@@ -32,19 +32,20 @@ Rust imports use the package's library identifier, `butterfly_fft`.
    place over caller-provided buffers. Validation and backend dispatch happen at
    the public boundary, never per butterfly. `tests/zero_alloc.rs` enforces
    this invariant.
-5. **Shared plan validation.** `ShiftedPlan` exposes the same applicable
-   execution models as `TransformPlan`. Constructors share size and basis
-   validation so equivalent invalid inputs return equivalent errors.
+5. **Coset plans share validation.** `TransformPlan::with_shift` runs the
+   same size and basis validation as the subspace constructors, so
+   equivalent invalid inputs return equivalent errors.
 6. **Stable API boundaries.** Factor tables and tuning data remain behind the
    `internals` feature. Do not widen the stable API to expose implementation
    details.
-7. **Kernel ownership.** Every intrinsic belongs under `src/core/kernel`.
-   Unsafe target-feature calls must check every feature named by their
-   `#[target_feature]`. Every SIMD forward and inverse kernel is differentially
-   tested against scalar field arithmetic, including tails, zero/one factors,
-   and nontrivial factors.
-8. **Sysroot paths.** The crate has a module named `core`; sysroot paths in
-   crate code must be absolute (`::core::...`, `::std::...`).
+7. **Kernel ownership.** Every intrinsic belongs under `src/kernel`. The
+   per-tier kernel entries live on the crate-private `TierButterflies`
+   trait, sealed behind the private `RawDispatch` proof; the public
+   `ButterflyKernels` trait carries no `unsafe` surface. Every SIMD forward
+   and inverse kernel is differentially tested against scalar field
+   arithmetic, including tails, zero/one factors, and nontrivial factors.
+8. **Sysroot paths.** Sysroot paths in crate code are written absolutely
+   (`::core::...`, `::std::...`); CI enforces the form.
 9. **Feature discipline.** The crate is `no_std` plus `alloc` without default
    features. New code must not reach for `std` outside `#[cfg(feature = "std")]`.
 10. **Documentation.** Public items stay documented and
@@ -53,7 +54,7 @@ Rust imports use the package's library identifier, `butterfly_fft`.
 ## Backend selection
 
 `simdispatch` is the single source for backend detection, ordering, and the
-stack-wide downgrade-only `SIMD_BACKEND` override. `core::kernel::BUTTERFLY_FFT_TIERS`
+stack-wide downgrade-only `SIMD_BACKEND` override. `kernel::BUTTERFLY_FFT_TIERS`
 contains the tiers implemented by this crate. Do not add a crate-local CPU
 probe or environment override.
 
@@ -62,19 +63,34 @@ probe or environment override.
 `just validate` is the pull-request gate; the shared recipe surface is
 documented once in the umbrella's root `AGENTS.md`. Crate specifics:
 
+- The `internals` facade is the crate's single `feature = "internals"` site.
+  The facade-only items in `src/tuning.rs`, `TransformPlan::table`, and the
+  `FactorTable` accessors carry per-item `#[allow(dead_code)]`: they are
+  alive whenever the facade is compiled and unreachable otherwise, which is
+  the visibility-only exception the mechanism permits.
+- Test target `factor_table` requires `internals`; it exercises the facade
+  surface against the public derivative as oracle.
+
 - **`TIERS = v3_gfni_crypto v3 v2 scalar`**, matching the tiers
-  `core::kernel::BUTTERFLY_FFT_TIERS` declares. Dispatch resolves one backend
+  `kernel::BUTTERFLY_FFT_TIERS` declares. Dispatch resolves one backend
   per process, so `just test-tiers` and `just cover` re-run the suite once per
   tier; a single host run only ever exercises the strongest.
 - **`MIRI = --no-default-features`.** The `no_std` + `alloc` closure is what
-  miri can execute, and the run covers the safe wrappers over
-  `src/core/kernel` — walker geometry, scratch sizing, and the checked byte-row
-  arithmetic of hard rule 2. Intrinsics remain the job of the differential
-  kernel tests.
+  miri can execute, and the run covers the safe wrappers over `src/kernel`
+  — walker geometry, scratch sizing, and the checked byte-row
+  kernel tests. Superlinear test sweeps and large transform magnitudes
+  shrink under `cfg!(miri)` (see the `log_cap` / `max_log` / `max_dimension`
+  helpers and the geometry lists in `tests/zero_alloc.rs`): miri validates
+  geometry and safety, not throughput, and every boundary class —
+  multi-element rows, partial-element tails, awkward truncations — stays
+  represented at the smaller sizes. The full run sits near twenty-six
+  minutes; growing it past that needs a reason.
 - **`COV_IGNORE` is empty**: every line counts toward the 95% gate.
-- **Bench target:** `ntt` — `just bench-save ntt`, then `just bench ntt`. The
-  excluded `benchmarks/afft` project is not a cargo bench target and is not
-  reachable from these recipes.
+- **Bench target:** `ntt` — `just bench-save ntt`, then `just bench ntt`.
+  The `ntt_tuning` target (requires `internals`) drives the fused and
+  packed NTT butterfly schedules past production selection for crossover
+  measurement; its record is the "NTT fused butterflies" section of
+  `BENCHMARKS.md`.
 - `justfile` is a byte-identical vendored copy; never edit it here or the
   umbrella's `just drift` check fails. Crate-specific values and recipes belong
   in `crate.just`.

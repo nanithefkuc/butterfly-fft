@@ -28,7 +28,7 @@ impl Rng {
 
     /// A canonical element: raw bytes are reduced through `add(ZERO)`.
     fn elem<F: Field>(&mut self) -> F::Elem {
-        F::read(&self.next_u64().to_le_bytes()[..F::BYTES]).add(F::Elem::ZERO)
+        F::decode(&self.next_u64().to_le_bytes()[..F::BYTES]).add(F::Elem::ZERO)
     }
 
     fn elems<F: Field>(&mut self, count: usize) -> Vec<F::Elem> {
@@ -39,13 +39,13 @@ impl Rng {
 fn pack<F: Field>(values: &[F::Elem]) -> Vec<u8> {
     let mut bytes = vec![0u8; values.len() * F::BYTES];
     for (slot, &value) in bytes.chunks_exact_mut(F::BYTES).zip(values) {
-        F::write(slot, value);
+        F::encode(slot, value);
     }
     bytes
 }
 
 fn unpack<F: Field>(bytes: &[u8]) -> Vec<F::Elem> {
-    bytes.chunks_exact(F::BYTES).map(F::read).collect()
+    bytes.chunks_exact(F::BYTES).map(F::decode).collect()
 }
 
 /// Independent direct transform: `Y[k] = Σ_j x[j] · root^(j·k)`.
@@ -74,7 +74,7 @@ fn check_size<F: FieldKernels>(size: usize, seed: u64) {
 
     let mut rows = pack::<F>(&input);
     let mut scratch = plan.scratch(F::BYTES).expect("scratch");
-    plan.forward_bytes(&mut rows, F::BYTES, &mut scratch)
+    plan.forward_bytes_scratch(&mut rows, F::BYTES, &mut scratch)
         .expect("forward");
     assert_eq!(
         unpack::<F>(&rows),
@@ -83,7 +83,7 @@ fn check_size<F: FieldKernels>(size: usize, seed: u64) {
         F::NAME
     );
 
-    plan.inverse_bytes(&mut rows, F::BYTES, &mut scratch)
+    plan.inverse_bytes_scratch(&mut rows, F::BYTES, &mut scratch)
         .expect("inverse");
     assert_eq!(
         unpack::<F>(&rows),
@@ -96,45 +96,48 @@ fn check_size<F: FieldKernels>(size: usize, seed: u64) {
 /// Three lanes per row transform independently and agree with three
 /// separate single-lane transforms.
 fn check_lanes<F: FieldKernels>(size: usize, seed: u64) {
-    const LANES: usize = 3;
-    let plan = NttPlan::<F>::new(size).expect("supported size");
-    let mut rng = Rng(seed);
-    let lanes: Vec<Vec<F::Elem>> = (0..LANES).map(|_| rng.elems::<F>(size)).collect();
+    check_lanes_width::<F>(size, seed, 3);
+}
 
-    let row_len = LANES * F::BYTES;
+fn check_lanes_width<F: FieldKernels>(size: usize, seed: u64, lanes_count: usize) {
+    let mut rng = Rng(seed);
+    let lanes: Vec<Vec<F::Elem>> = (0..lanes_count).map(|_| rng.elems::<F>(size)).collect();
+
+    let row_len = lanes_count * F::BYTES;
+    let plan = NttPlan::<F>::new(size).expect("supported size");
     let mut rows = vec![0u8; size * row_len];
     for point in 0..size {
         for (lane, values) in lanes.iter().enumerate() {
             let at = point * row_len + lane * F::BYTES;
-            F::write(&mut rows[at..at + F::BYTES], values[point]);
+            F::encode(&mut rows[at..at + F::BYTES], values[point]);
         }
     }
 
     let mut scratch = plan.scratch(row_len).expect("scratch");
-    plan.forward_bytes(&mut rows, row_len, &mut scratch)
+    plan.forward_bytes_scratch(&mut rows, row_len, &mut scratch)
         .expect("forward");
 
     for (lane, values) in lanes.iter().enumerate() {
         let mut single = pack::<F>(values);
         let mut narrow = plan.scratch(F::BYTES).expect("scratch");
-        plan.forward_bytes(&mut single, F::BYTES, &mut narrow)
+        plan.forward_bytes_scratch(&mut single, F::BYTES, &mut narrow)
             .expect("forward");
         let expected = unpack::<F>(&single);
         let got: Vec<F::Elem> = (0..size)
             .map(|point| {
                 let at = point * row_len + lane * F::BYTES;
-                F::read(&rows[at..at + F::BYTES])
+                F::decode(&rows[at..at + F::BYTES])
             })
             .collect();
         assert_eq!(got, expected, "{} lane {lane} size {size}", F::NAME);
     }
 
-    plan.inverse_bytes(&mut rows, row_len, &mut scratch)
+    plan.inverse_bytes_scratch(&mut rows, row_len, &mut scratch)
         .expect("inverse");
     for point in 0..size {
         for (lane, values) in lanes.iter().enumerate() {
             let at = point * row_len + lane * F::BYTES;
-            assert_eq!(F::read(&rows[at..at + F::BYTES]), values[point]);
+            assert_eq!(F::decode(&rows[at..at + F::BYTES]), values[point]);
         }
     }
 }
@@ -142,38 +145,51 @@ fn check_lanes<F: FieldKernels>(size: usize, seed: u64) {
 fn forward_of<F: FieldKernels>(plan: &NttPlan<F>, raw: &[u8]) -> Vec<F::Elem> {
     let mut rows = raw.to_vec();
     let mut scratch = plan.scratch(F::BYTES).expect("scratch");
-    plan.forward_bytes(&mut rows, F::BYTES, &mut scratch)
+    plan.forward_bytes_scratch(&mut rows, F::BYTES, &mut scratch)
         .expect("forward");
     unpack::<F>(&rows)
 }
-
-const SIZES: [usize; 5] = [1, 2, 4, 8, 32];
+/// Acceptance sizes: the 256-point direct DFT is quadratic and stays out
+/// of the miri run, which checks the same contracts at small sizes.
+fn sizes() -> &'static [usize] {
+    if cfg!(miri) {
+        &[1, 2, 4, 8, 32]
+    } else {
+        &[1, 2, 4, 8, 32, 256]
+    }
+}
 
 #[test]
 fn goldilocks_forward_matches_direct_dft() {
-    for size in SIZES {
+    for &size in sizes() {
         check_size::<Goldilocks>(size, 0x1234_5678_9abc_def1);
     }
 }
 
 #[test]
 fn quad_mersenne31_forward_matches_direct_dft() {
-    for size in SIZES {
+    for &size in sizes() {
         check_size::<QuadMersenne31>(size, 0x0f0f_1e2d_3c4b_5a69);
     }
 }
 
 #[test]
 fn goldilocks_lanes_are_independent() {
-    for size in SIZES {
+    for &size in sizes() {
         check_lanes::<Goldilocks>(size, 0xdead_beef_cafe_0001);
     }
 }
 
 #[test]
 fn quad_mersenne31_lanes_are_independent() {
-    for size in SIZES {
+    for &size in sizes() {
         check_lanes::<QuadMersenne31>(size, 0x0bad_c0de_1357_9bdf);
+    }
+}
+#[test]
+fn quad_mersenne31_wide_rows_match_single_lane_transforms() {
+    for lanes in [4usize, 16] {
+        check_lanes_width::<QuadMersenne31>(32, 0x0def_ec7a_0000_0000 + lanes as u64, lanes);
     }
 }
 
@@ -292,10 +308,10 @@ fn size_one_is_the_identity_everywhere() {
         let input = rng.elems::<F>(1);
         let mut rows = pack::<F>(&input);
         let mut scratch = plan.scratch(F::BYTES).expect("scratch");
-        plan.forward_bytes(&mut rows, F::BYTES, &mut scratch)
+        plan.forward_bytes_scratch(&mut rows, F::BYTES, &mut scratch)
             .expect("forward");
         assert_eq!(unpack::<F>(&rows), input, "{} forward", F::NAME);
-        plan.inverse_bytes(&mut rows, F::BYTES, &mut scratch)
+        plan.inverse_bytes_scratch(&mut rows, F::BYTES, &mut scratch)
             .expect("inverse");
         assert_eq!(unpack::<F>(&rows), input, "{} inverse", F::NAME);
     }
@@ -328,7 +344,7 @@ fn validation_errors_leave_the_destination_untouched() {
     // Wrong buffer length.
     let mut rows = pristine.clone();
     assert_eq!(
-        plan.forward_bytes(&mut rows[..3 * row_len], row_len, &mut scratch)
+        plan.forward_bytes_scratch(&mut rows[..3 * row_len], row_len, &mut scratch)
             .unwrap_err(),
         NttError::BufferLength {
             expected: 4 * row_len,
@@ -341,7 +357,7 @@ fn validation_errors_leave_the_destination_untouched() {
     let ragged = row_len + 1;
     let mut rows = pristine.clone();
     assert_eq!(
-        plan.forward_bytes(&mut rows, ragged, &mut scratch)
+        plan.forward_bytes_scratch(&mut rows, ragged, &mut scratch)
             .unwrap_err(),
         NttError::InvalidRowLength {
             row_len: ragged,
@@ -354,7 +370,7 @@ fn validation_errors_leave_the_destination_untouched() {
     let mut narrow = plan.scratch(element).expect("scratch");
     let mut rows = pristine.clone();
     assert_eq!(
-        plan.forward_bytes(&mut rows, row_len, &mut narrow)
+        plan.forward_bytes_scratch(&mut rows, row_len, &mut narrow)
             .unwrap_err(),
         NttError::ScratchTooSmall {
             required: row_len,
@@ -364,7 +380,7 @@ fn validation_errors_leave_the_destination_untouched() {
     assert_eq!(rows, pristine, "scratch rejection mutated the rows");
 
     assert_eq!(
-        plan.inverse_bytes(&mut rows, row_len, &mut narrow)
+        plan.inverse_bytes_scratch(&mut rows, row_len, &mut narrow)
             .unwrap_err(),
         NttError::ScratchTooSmall {
             required: row_len,
@@ -375,7 +391,7 @@ fn validation_errors_leave_the_destination_untouched() {
 
     // Plan and scratch survive the rejections: a valid call still runs, and
     // still agrees with the direct DFT lane by lane.
-    plan.forward_bytes(&mut rows, row_len, &mut scratch)
+    plan.forward_bytes_scratch(&mut rows, row_len, &mut scratch)
         .expect("forward after rejections");
     for lane in 0..2 {
         let lane_input: Vec<_> = (0..4).map(|point| input[point * 2 + lane]).collect();
@@ -383,12 +399,12 @@ fn validation_errors_leave_the_destination_untouched() {
         let got: Vec<_> = (0..4)
             .map(|point| {
                 let at = point * row_len + lane * element;
-                <Goldilocks as Field>::read(&rows[at..at + element])
+                <Goldilocks as Field>::decode(&rows[at..at + element])
             })
             .collect();
         assert_eq!(got, expected);
     }
-    plan.inverse_bytes(&mut rows, row_len, &mut scratch)
+    plan.inverse_bytes_scratch(&mut rows, row_len, &mut scratch)
         .expect("inverse after rejections");
     assert_eq!(rows, pristine);
 }
@@ -406,26 +422,34 @@ fn scratch_rejects_a_ragged_row_length() {
 }
 
 #[test]
-fn zero_row_length_is_a_no_op() {
+fn zero_row_length_is_rejected() {
     let plan = NttPlan::<Goldilocks>::new(4).expect("supported size");
-    let mut scratch = plan.scratch(0).expect("scratch");
-    let mut rows: Vec<u8> = Vec::new();
-    plan.forward_bytes(&mut rows, 0, &mut scratch)
-        .expect("zero-lane forward");
-    plan.inverse_bytes(&mut rows, 0, &mut scratch)
-        .expect("zero-lane inverse");
-    assert!(rows.is_empty());
-
-    // A zero-lane scratch is still too small for a real row.
-    let mut real = vec![0u8; 4 * <Goldilocks as Field>::BYTES];
     assert_eq!(
-        plan.forward_bytes(&mut real, <Goldilocks as Field>::BYTES, &mut scratch)
-            .unwrap_err(),
-        NttError::ScratchTooSmall {
-            required: <Goldilocks as Field>::BYTES,
-            available: 0,
+        plan.scratch(0).unwrap_err(),
+        NttError::InvalidRowLength {
+            row_len: 0,
+            element_bytes: <Goldilocks as Field>::BYTES,
         }
     );
+    let mut scratch = plan.scratch(8).expect("scratch");
+    let mut rows: Vec<u8> = Vec::new();
+    assert_eq!(
+        plan.forward_bytes_scratch(&mut rows, 0, &mut scratch)
+            .unwrap_err(),
+        NttError::InvalidRowLength {
+            row_len: 0,
+            element_bytes: <Goldilocks as Field>::BYTES,
+        }
+    );
+    assert_eq!(
+        plan.inverse_bytes_scratch(&mut rows, 0, &mut scratch)
+            .unwrap_err(),
+        NttError::InvalidRowLength {
+            row_len: 0,
+            element_bytes: <Goldilocks as Field>::BYTES,
+        }
+    );
+    assert!(rows.is_empty());
 }
 
 /// A scratch carries the element width it was built for, so handing a
@@ -442,11 +466,11 @@ fn scratch_from_a_different_field_is_rejected() {
     let element = <QuadMersenne31 as Field>::BYTES;
     let mut rows = vec![0u8; 4 * element];
     assert_eq!(
-        plan.forward_bytes(&mut rows, element, &mut foreign)
+        plan.forward_bytes_scratch(&mut rows, element, &mut foreign)
             .unwrap_err(),
-        NttError::InvalidRowLength {
-            row_len: element,
-            element_bytes: element,
+        NttError::ScratchFieldMismatch {
+            scratch_element_bytes: <Mersenne31 as Field>::BYTES,
+            field_element_bytes: element,
         }
     );
 }

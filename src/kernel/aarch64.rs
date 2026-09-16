@@ -1,7 +1,7 @@
 //! AArch64 NEON butterfly kernels for GF(2^8) and GF(2^16).
 //!
 //! NEON is baseline on AArch64, so there is a single tier, selected at
-//! runtime by [`crate::core::kernel::backend`] like every other backend:
+//! runtime by [`crate::kernel::backend`] like every other backend:
 //!
 //! - **GF(2^8)**: split-nibble `TBL` tables, `c·x = lo[x&0xF] ^ hi[x>>4]`.
 //! - **GF(2^16)**: bit-serial base-field multiply with the
@@ -31,8 +31,8 @@ fn scale_table(coefficient: gf8b::Elem) -> ScaleTable {
     let mut low = [0; 16];
     let mut high = [0; 16];
     for nibble in 0..16u8 {
-        low[nibble as usize] = gf8b::Elem(nibble).mul(coefficient).0;
-        high[nibble as usize] = gf8b::Elem(nibble << 4).mul(coefficient).0;
+        low[nibble as usize] = gf8b::Elem::from_raw(nibble).mul(coefficient).to_raw();
+        high[nibble as usize] = gf8b::Elem::from_raw(nibble << 4).mul(coefficient).to_raw();
     }
     ScaleTable { low, high }
 }
@@ -41,10 +41,10 @@ fn scale_table(coefficient: gf8b::Elem) -> ScaleTable {
 /// `same = [c0, c0+c1]`, `cross = [Δ·c1, c1]` in each 16-bit lane.
 #[inline]
 fn factor_words(coefficient: gf16::Elem) -> (u16, u16) {
-    let (c0, c1) = coefficient.components();
+    let (c0, c1) = coefficient.to_components();
     let delta_c1 = gf16::DELTA.mul(c1);
-    let same = u16::from_le_bytes([c0.0, c0.add(c1).0]);
-    let cross = u16::from_le_bytes([delta_c1.0, c1.0]);
+    let same = u16::from_le_bytes([c0.to_raw(), c0.add(c1).to_raw()]);
+    let cross = u16::from_le_bytes([delta_c1.to_raw(), c1.to_raw()]);
     (same, cross)
 }
 

@@ -19,12 +19,12 @@ pub(crate) fn fused_forward<F: Field>(low: &mut [u8], high: &mut [u8], coefficie
             &mut low[start..start + F::BYTES],
             &mut high[start..start + F::BYTES],
         );
-        let lo = F::read(l);
-        let hi = F::read(h);
+        let lo = F::decode(l);
+        let hi = F::decode(h);
         let new_low = lo.add(coefficient.mul(hi));
         let new_high = hi.add(new_low);
-        F::write(l, new_low);
-        F::write(h, new_high);
+        F::encode(l, new_low);
+        F::encode(h, new_high);
     }
 }
 
@@ -38,11 +38,11 @@ pub(crate) fn fused_inverse<F: Field>(low: &mut [u8], high: &mut [u8], coefficie
             &mut low[start..start + F::BYTES],
             &mut high[start..start + F::BYTES],
         );
-        let lo = F::read(l);
-        let hi = F::read(h);
+        let lo = F::decode(l);
+        let hi = F::decode(h);
         let new_high = hi.add(lo);
         let new_low = lo.add(coefficient.mul(new_high));
-        F::write(l, new_low);
-        F::write(h, new_high);
+        F::encode(l, new_low);
+        F::encode(h, new_high);
     }
 }

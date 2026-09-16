@@ -1,14 +1,10 @@
 //! Multiplicative (number-theoretic) transforms.
 //!
-//! The rest of this crate evaluates over *additive* subspaces of a binary
-//! field. This module is the second transform family over the same
-//! mathematical object: a radix-two Cooley–Tukey transform over the
-//! *multiplicative* group of a field that contains a primitive `size`-th
-//! root of unity. Field arithmetic still comes from [`fgf`]; nothing here
-//! re-implements a field loop, and SIMD selection stays where it already
-//! lives.
-//!
-//! ## Convention
+//! Radix-two Cooley–Tukey transforms over the multiplicative group of a
+//! field that contains a primitive `size`-th root of unity — the second
+//! transform family over the same field objects, beside the additive
+//! subspaces the rest of this crate evaluates over. Field arithmetic
+//! comes from [`fgf`]; nothing here re-implements a field loop.
 //!
 //! For a plan of size `n` with root `ω` ([`NttPlan::root`]), the forward
 //! transform maps input `x` to
@@ -17,44 +13,43 @@
 //! Y[k] = Σ_{j=0}^{n-1} x[j] · ω^(j·k),   k = 0 … n-1
 //! ```
 //!
-//! Input is consumed in natural order and output is produced in **natural
-//! order**: the implementation applies the bit-reversal permutation first
-//! and then runs decimation-in-time butterflies. The inverse runs the same
-//! loop with `ω^-1` and finishes by scaling every lane by `n^-1`, so
-//! `inverse(forward(x)) == x` exactly. `size == 1` is the identity.
-//!
-//! ## Field reach
+//! Input is consumed in natural order and output is produced in natural
+//! order: the bit-reversal permutation runs first, then
+//! decimation-in-time butterflies. The inverse runs the same loop with
+//! `ω^-1` and finishes by scaling every lane by `n^-1`. `size == 1` is
+//! the identity.
 //!
 //! A plan exists exactly when `size` divides the order of the
-//! multiplicative group, `|F| - 1`, and `size <= 1 << MAX_LOG_SIZE`:
+//! multiplicative group, `|F| - 1`, and `size <= 1 << MAX_LOG_SIZE`.
+//! Goldilocks (`2^32 | p - 1`) and `QuadMersenne31` (`2^32 | p² - 1`)
+//! admit every size up to the cap. Base `Mersenne31`'s group has a single
+//! factor of two, so size `2` is its largest radix-two transform — which
+//! is why convolution over `Mersenne31` embeds into `QuadMersenne31`.
+//! The binary fields have odd group order, so only the identity
+//! `size == 1` is accepted; the divisibility rule says so with no special
+//! case in the code.
 //!
-//! - **Goldilocks** (`p = 2^64 - 2^32 + 1`): `p - 1 = 2^32·(2^32 - 1)`, so
-//!   `2^32 | p - 1` and every size up to `2^20` is available.
-//! - **`QuadMersenne31`** (`|F| = p²`, `p = 2^31 - 1`): `p² - 1 =
-//!   (p-1)(p+1)` and `p + 1 = 2^31`, so `2^32 | p² - 1` and every size up
-//!   to `2^20` is available.
-//! - **Base `Mersenne31`**: `p - 1 = 2·(2^30 - 1)` with an odd cofactor, so
-//!   the only nontrivial radix-two size is `2`. That is why convolution
-//!   over `Mersenne31` embeds into `QuadMersenne31` instead of using this
-//!   field's own multiplicative group.
-//! - **Binary fields** (`|F| = 2^m`): `|F| - 1` is odd, so no even size
-//!   divides it and only `size == 1`, the identity, is accepted. There is
-//!   no special case for them in the code; the divisibility rule already
-//!   says so.
+//! # Layout
 //!
-//! ## Buffers
+//! `rows` holds `size` contiguous rows of `row_len` bytes, and a row is a
+//! vector of independent lanes that all undergo the same transform; one
+//! lane per row is the scalar case. The plan owns every twiddle and the
+//! `n^-1` scale, prepared once at construction, so
+//! [`NttPlan::forward_bytes_scratch`] and [`NttPlan::inverse_bytes_scratch`]
+//! allocate nothing and prepare nothing. Consumers own padding and
+//! truncation: a plan transforms exactly `size` points, and choosing a
+//! transform length large enough that a cyclic convolution does not wrap
+//! is the caller's responsibility.
 //!
-//! Execution is byte-oriented: `rows` holds `size` contiguous rows of
-//! `row_len` bytes, and a row is a vector of independent lanes that all
-//! undergo the same transform. One lane per row is the scalar case. The
-//! plan owns every twiddle and the `n^-1` scale, prepared once at
-//! construction, so [`NttPlan::forward_bytes`] and
-//! [`NttPlan::inverse_bytes`] allocate nothing and prepare nothing.
+//! # Totality and canonicalization
 //!
-//! Consumers own padding and truncation. A plan transforms exactly `size`
-//! points; zero-extending a shorter input and cutting the result back down
-//! — including choosing a transform length large enough that a cyclic
-//! convolution does not wrap — is the caller's responsibility.
+//! Execution over the prime fields canonicalizes every input lane before
+//! the first butterfly, so different raw encodings of one field value
+//! transform to the same result; characteristic two has a unique
+//! representative per value and skips the pass entirely. Identities hold
+//! in field values: `inverse(forward(x))` equals `x` in every lane, and
+//! the encoded bytes return unchanged whenever the input lanes were
+//! canonical.
 
 use ::alloc::vec::Vec;
 
@@ -62,115 +57,27 @@ use fgf::field::{Elem, Field};
 use fgf::kernel::FieldKernels;
 use fgf::ops::{self, Coeff};
 
-use crate::core::transform::MAX_LOG_SIZE;
+pub use crate::error::NttError;
 
-/// Error returned by multiplicative-transform plan construction and
-/// execution.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NttError {
-    /// Transform size was zero or not a power of two.
-    InvalidSize {
-        /// The offending size.
-        size: usize,
-    },
-    /// The field has no primitive `size`-th root of unity, or `size`
-    /// exceeds the table-size cap `MAX_LOG_SIZE`. A power-of-two `size`
-    /// above one needs `size` to divide `field_order - 1`, which no binary
-    /// field satisfies.
-    UnsupportedSize {
-        /// The requested size.
-        size: usize,
-        /// Number of elements in the field.
-        field_order: u128,
-    },
-    /// A size, offset, or byte length did not fit in `usize`/`u64`.
-    GeometryOverflow,
-    /// A table or scratch allocation failed.
-    AllocationFailed,
-    /// The row buffer length does not match `size * row_len`.
-    BufferLength {
-        /// Length the plan requires, in bytes.
-        expected: usize,
-        /// Length the caller supplied, in bytes.
-        actual: usize,
-    },
-    /// A row length is not a whole number of field elements, or the
-    /// supplied scratch was built for a field of a different element width.
-    InvalidRowLength {
-        /// The offending row length, in bytes.
-        row_len: usize,
-        /// Width of one field element, in bytes.
-        element_bytes: usize,
-    },
-    /// The supplied scratch row temporary is shorter than the requested
-    /// row length.
-    ScratchTooSmall {
-        /// Row bytes required.
-        required: usize,
-        /// Row bytes the scratch was built for.
-        available: usize,
-    },
-}
+use crate::transform::MAX_LOG_SIZE;
 
-impl ::core::fmt::Display for NttError {
-    fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        match self {
-            Self::InvalidSize { size } => {
-                write!(
-                    formatter,
-                    "invalid transform size {size}: not a power of two"
-                )
-            }
-            Self::UnsupportedSize { size, field_order } => {
-                write!(
-                    formatter,
-                    "no primitive root of unity of order {size} in a field of order {field_order}"
-                )
-            }
-            Self::GeometryOverflow => {
-                write!(formatter, "transform geometry overflowed")
-            }
-            Self::AllocationFailed => {
-                write!(formatter, "transform table allocation failed")
-            }
-            Self::BufferLength { expected, actual } => {
-                write!(
-                    formatter,
-                    "wrong row buffer length: expected {expected} bytes, got {actual}"
-                )
-            }
-            Self::InvalidRowLength {
-                row_len,
-                element_bytes,
-            } => {
-                write!(
-                    formatter,
-                    "row length {row_len} is not a whole number of {element_bytes}-byte elements"
-                )
-            }
-            Self::ScratchTooSmall {
-                required,
-                available,
-            } => {
-                write!(
-                    formatter,
-                    "scratch too small: need {required} row bytes, have {available}"
-                )
-            }
-        }
-    }
-}
+/// Row length in bytes at or below which butterfly stages over fields with
+/// vector elementwise kernels run in the fused register form; wider rows
+/// and every geometry over fields without vector kernels (which the fused
+/// form dominates outright) follow the rule beside the selector. A pure
+/// function of the row geometry and the resolved backend, set by the
+/// interleaved campaign behind the "NTT fused butterflies" record in
+/// `BENCHMARKS.md`.
+const FUSED_ROW_MAX: usize = 8;
 
-#[cfg(feature = "std")]
-impl ::std::error::Error for NttError {}
-
-/// Reusable row temporary for [`NttPlan::forward_bytes`] and
-/// [`NttPlan::inverse_bytes`].
+/// Reusable row temporary for [`NttPlan::forward_bytes_scratch`] and
+/// [`NttPlan::inverse_bytes_scratch`].
 ///
-/// Holds exactly one row and remembers the element width and row length it
-/// was built for, so reuse against a different geometry is rejected instead
-/// of silently transforming the wrong shape. Not generic: the recorded
-/// element width is what ties it to a field.
+/// Holds one row and records the element width and row capacity it was
+/// built for. Reuse over the same field at any row length up to the built
+/// capacity is accepted; a different element width or a longer row is
+/// rejected by the execution methods. Not generic: the recorded element
+/// width is what ties it to a field.
 #[derive(Clone, Debug)]
 pub struct NttScratch {
     /// One row of butterfly temporaries, `row_len` bytes.
@@ -316,11 +223,11 @@ impl<F: FieldKernels> NttPlan<F> {
     /// `row_len` over a field of the same element width.
     ///
     /// # Errors
-    /// [`NttError::InvalidRowLength`] if `row_len` is not a whole number of
-    /// elements; [`NttError::AllocationFailed`] if the row cannot be
-    /// allocated.
+    /// [`NttError::InvalidRowLength`] if `row_len` is zero or not a whole
+    /// number of elements; [`NttError::AllocationFailed`] if the row cannot
+    /// be allocated.
     pub fn scratch(&self, row_len: usize) -> Result<NttScratch, NttError> {
-        if !row_len.is_multiple_of(F::BYTES) {
+        if row_len == 0 || !row_len.is_multiple_of(F::BYTES) {
             return Err(NttError::InvalidRowLength {
                 row_len,
                 element_bytes: F::BYTES,
@@ -343,18 +250,19 @@ impl<F: FieldKernels> NttPlan<F> {
     /// is written unless every structural check below passes.
     ///
     /// # Errors
-    /// [`NttError::InvalidRowLength`], [`NttError::BufferLength`],
-    /// [`NttError::ScratchTooSmall`], or [`NttError::GeometryOverflow`].
-    pub fn forward_bytes(
+    /// [`NttError::InvalidRowLength`] for a zero or partial-element row
+    /// length; [`NttError::BufferLength`] for a wrong buffer length;
+    /// [`NttError::ScratchFieldMismatch`] when the scratch was built for a
+    /// different element width; [`NttError::ScratchTooSmall`] when its row
+    /// capacity is below `row_len`; [`NttError::GeometryOverflow`] when
+    /// the total length does not fit [`usize`].
+    pub fn forward_bytes_scratch(
         &self,
         rows: &mut [u8],
         row_len: usize,
         scratch: &mut NttScratch,
     ) -> Result<(), NttError> {
         self.validate(rows.len(), row_len, scratch)?;
-        if row_len == 0 {
-            return Ok(());
-        }
         canonicalize::<F>(rows);
         self.butterflies(rows, row_len, &self.forward_twiddles, scratch);
         Ok(())
@@ -363,20 +271,17 @@ impl<F: FieldKernels> NttPlan<F> {
     /// Inverse transform, in place, over `size` rows of `row_len` bytes.
     ///
     /// Runs the forward loop with `root^-1` and then scales every lane by
-    /// `size^-1`, so it inverts [`NttPlan::forward_bytes`] exactly.
+    /// `size^-1`, so it inverts [`NttPlan::forward_bytes_scratch`] exactly.
     ///
     /// # Errors
-    /// As [`NttPlan::forward_bytes`].
-    pub fn inverse_bytes(
+    /// As [`NttPlan::forward_bytes_scratch`].
+    pub fn inverse_bytes_scratch(
         &self,
         rows: &mut [u8],
         row_len: usize,
         scratch: &mut NttScratch,
     ) -> Result<(), NttError> {
         self.validate(rows.len(), row_len, scratch)?;
-        if row_len == 0 {
-            return Ok(());
-        }
         canonicalize::<F>(rows);
         self.butterflies(rows, row_len, &self.inverse_twiddles, scratch);
         ops::mul_assign_with(rows, &self.inverse_scale);
@@ -390,7 +295,7 @@ impl<F: FieldKernels> NttPlan<F> {
         row_len: usize,
         scratch: &NttScratch,
     ) -> Result<(), NttError> {
-        if !row_len.is_multiple_of(F::BYTES) {
+        if row_len == 0 || !row_len.is_multiple_of(F::BYTES) {
             return Err(NttError::InvalidRowLength {
                 row_len,
                 element_bytes: F::BYTES,
@@ -407,9 +312,9 @@ impl<F: FieldKernels> NttPlan<F> {
             });
         }
         if scratch.element_bytes != F::BYTES {
-            return Err(NttError::InvalidRowLength {
-                row_len,
-                element_bytes: F::BYTES,
+            return Err(NttError::ScratchFieldMismatch {
+                scratch_element_bytes: scratch.element_bytes,
+                field_element_bytes: F::BYTES,
             });
         }
         if scratch.row_len < row_len {
@@ -421,7 +326,8 @@ impl<F: FieldKernels> NttPlan<F> {
         Ok(())
     }
 
-    /// Bit-reversal permutation followed by `log_size` butterfly stages.
+    /// Bit-reversal permutation followed by `log_size` butterfly stages
+    /// through the selected schedule.
     ///
     /// `row_len` is nonzero and a whole number of elements, `rows` is
     /// `size * row_len` bytes, and `scratch` holds at least one row: all
@@ -433,13 +339,79 @@ impl<F: FieldKernels> NttPlan<F> {
         twiddles: &[Coeff<F>],
         scratch: &mut NttScratch,
     ) {
+        self.permute(rows, row_len);
+        // Fields with vector elementwise kernels keep the packed op-call
+        // form wherever a row spans multiple elements: the measured
+        // crossover keeps wide rows on the packed kernels. Fields without
+        // them run the fused form at every row width, where the campaign
+        // shows it ahead at every measured geometry.
+        let fused = !F::has_vector_elementwise() || row_len <= FUSED_ROW_MAX;
+        if fused {
+            self.butterflies_fused(rows, row_len, twiddles);
+        } else {
+            self.butterflies_packed(rows, row_len, twiddles, scratch);
+        }
+    }
+
+    /// Swap rows into bit-reversed order, in place.
+    fn permute(&self, rows: &mut [u8], row_len: usize) {
         for (index, &target) in self.permutation.iter().enumerate() {
             if index < target {
                 let (head, tail) = rows.split_at_mut(target * row_len);
                 head[index * row_len..(index + 1) * row_len].swap_with_slice(&mut tail[..row_len]);
             }
         }
+    }
 
+    /// `log_size` butterfly stages with each element pair held in registers.
+    ///
+    /// Every butterfly computes `low' = low + t·high` and
+    /// `high' = low − t·high` one element at a time: no scratch row, no
+    /// whole-row copy, and one backend-independent walk per stage. Operand
+    /// bytes are canonical before the first stage, and every store writes a
+    /// canonical element, so the invariant holds stage after stage. Geometry
+    /// is established by [`NttPlan::validate`].
+    fn butterflies_fused(&self, rows: &mut [u8], row_len: usize, twiddles: &[Coeff<F>]) {
+        let lanes = row_len / F::BYTES;
+        for stage in 0..self.log_size {
+            let half = 1usize << stage;
+            let base = self.stage_offsets[stage];
+            let half_bytes = half * row_len;
+            for block in rows.chunks_exact_mut(half_bytes * 2) {
+                let (lows, highs) = block.split_at_mut(half_bytes);
+                let pairs = lows
+                    .chunks_exact_mut(row_len)
+                    .zip(highs.chunks_exact_mut(row_len));
+                for (offset, (low, high)) in pairs.enumerate() {
+                    let twiddle = twiddles[base + offset].value();
+                    for lane in 0..lanes {
+                        let at = lane * F::BYTES;
+                        let u = F::decode(&low[at..at + F::BYTES]);
+                        let v = F::decode(&high[at..at + F::BYTES]);
+                        let w = if twiddle == F::Elem::ONE {
+                            v
+                        } else {
+                            v.mul(twiddle)
+                        };
+                        F::encode(&mut low[at..at + F::BYTES], u.add(w));
+                        F::encode(&mut high[at..at + F::BYTES], u.sub(w));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The packed op-call butterfly form: one whole-row prepared multiply
+    /// into scratch, one row copy, and packed add and subtract per pair.
+    /// Kept as the tuning control the fused schedule is measured against;
+    /// see the "NTT fused butterflies" record in `BENCHMARKS.md`.
+    fn butterflies_packed(
+        &self,
+        rows: &mut [u8],
+        row_len: usize,
+        twiddles: &[Coeff<F>],
+        scratch: &mut NttScratch,
+    ) {
         let temp = &mut scratch.row[..row_len];
         for stage in 0..self.log_size {
             let half = 1usize << stage;
@@ -462,6 +434,42 @@ impl<F: FieldKernels> NttPlan<F> {
     }
 }
 
+impl<F: FieldKernels> NttPlan<F> {
+    /// Tuning-only forward transform forced through
+    /// [`NttPlan::butterflies_fused`]. Same contract as
+    /// [`NttPlan::forward_bytes_scratch`]; reachable through the
+    /// `internals` facade only.
+    pub(crate) fn forward_fused(
+        &self,
+        rows: &mut [u8],
+        row_len: usize,
+        scratch: &mut NttScratch,
+    ) -> Result<(), NttError> {
+        self.validate(rows.len(), row_len, scratch)?;
+        canonicalize::<F>(rows);
+        self.permute(rows, row_len);
+        self.butterflies_fused(rows, row_len, &self.forward_twiddles);
+        Ok(())
+    }
+
+    /// Tuning-only forward transform forced through
+    /// [`NttPlan::butterflies_packed`]. Same contract as
+    /// [`NttPlan::forward_bytes_scratch`]; reachable through the
+    /// `internals` facade only.
+    pub(crate) fn forward_packed(
+        &self,
+        rows: &mut [u8],
+        row_len: usize,
+        scratch: &mut NttScratch,
+    ) -> Result<(), NttError> {
+        self.validate(rows.len(), row_len, scratch)?;
+        canonicalize::<F>(rows);
+        self.permute(rows, row_len);
+        self.butterflies_packed(rows, row_len, &self.forward_twiddles, scratch);
+        Ok(())
+    }
+}
+
 /// Bring every lane into canonical form once, before any packed kernel
 /// runs: fgf's prime-field kernels are defined on canonical lanes, while
 /// `pack` and `from_raw` preserve whatever representative the caller had.
@@ -475,7 +483,7 @@ fn canonicalize<F: FieldKernels>(rows: &mut [u8]) {
         return;
     }
     for slot in rows.chunks_exact_mut(F::BYTES) {
-        F::write(slot, F::read(slot).add(F::Elem::ZERO));
+        F::encode(slot, F::decode(slot).add(F::Elem::ZERO));
     }
 }
 
@@ -539,4 +547,177 @@ fn twiddle_table<F: FieldKernels>(
         }
     }
     Ok(table)
+}
+
+#[cfg(test)]
+mod tests {
+    //! The two butterfly schedules are algebraically identical, so
+    //! byte-for-byte agreement at straddling geometries is the contract for
+    //! the comparison that can run everywhere. The Goldilocks packed
+    //! schedule rides released fgf's packed kernels, which the
+    //! "Known correctness finding" in `BENCHMARKS.md` documents as computing
+    //! incorrect values nondeterministically once a Goldilocks buffer
+    //! reaches 256 elements on GFNI hosts, so wide Goldilocks geometries
+    //! check the fused schedule against an independent direct DFT instead
+    //! of against the suspect control. `QuadMersenne31` has no packed
+    //! kernels and compares at every geometry.
+    use super::*;
+    use alloc::vec;
+    use fgf::{Goldilocks, QuadMersenne31};
+
+    /// Deterministic xorshift, matching the integration suites.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn bytes(&mut self, target: &mut [u8]) {
+            let (slots, _) = target.as_chunks_mut::<8>();
+            for slot in slots {
+                slot.copy_from_slice(&self.next().to_le_bytes());
+            }
+        }
+    }
+
+    /// Independent direct transform: `Y[k] = Σ_j x[j] · root^(j·k)`, the
+    /// same formulation `tests/ntt.rs` uses as its ground truth.
+    fn direct_dft_lane<F: FieldKernels>(input: &[F::Elem], root: F::Elem) -> Vec<F::Elem> {
+        let size = input.len();
+        (0..size)
+            .map(|k| {
+                let mut total = F::Elem::ZERO;
+                for (j, &value) in input.iter().enumerate() {
+                    let exponent = (j * k) % size;
+                    total = total.add(value.mul(root.pow(exponent as u64)));
+                }
+                total
+            })
+            .collect()
+    }
+
+    fn check_schedules_agree<F: FieldKernels>(size: usize, lanes: usize, seed: u64) {
+        let row_len = lanes * F::BYTES;
+        let plan = NttPlan::<F>::new(size).expect("supported size");
+        let mut rng = Rng(seed);
+        let mut fused = vec![0u8; size * row_len];
+        rng.bytes(&mut fused);
+        let mut packed = fused.clone();
+        let mut scratch = plan.scratch(row_len).expect("scratch");
+
+        plan.forward_fused(&mut fused, row_len, &mut scratch)
+            .expect("geometry");
+        plan.forward_packed(&mut packed, row_len, &mut scratch)
+            .expect("geometry");
+        assert_eq!(
+            fused,
+            packed,
+            "{} size {size} lanes {lanes}: schedules disagree",
+            F::NAME
+        );
+    }
+
+    fn check_fused_matches_direct_dft<F: FieldKernels>(size: usize, lanes: usize, seed: u64) {
+        let row_len = lanes * F::BYTES;
+        let plan = NttPlan::<F>::new(size).expect("supported size");
+        let mut rng = Rng(seed);
+        let mut rows = vec![0u8; size * row_len];
+        rng.bytes(&mut rows);
+        let original = rows.clone();
+        let mut scratch = plan.scratch(row_len).expect("scratch");
+
+        plan.forward_fused(&mut rows, row_len, &mut scratch)
+            .expect("geometry");
+        for lane in 0..lanes {
+            let input: Vec<F::Elem> = (0..size)
+                .map(|point| {
+                    let at = point * row_len + lane * F::BYTES;
+                    F::decode(&original[at..at + F::BYTES])
+                })
+                .collect();
+            let expected = direct_dft_lane::<F>(&input, plan.root());
+            for (point, want) in expected.iter().enumerate() {
+                let at = point * row_len + lane * F::BYTES;
+                assert_eq!(
+                    F::decode(&rows[at..at + F::BYTES]),
+                    *want,
+                    "{} size {size} lane {lane}: fused forward disagrees with the direct DFT",
+                    F::NAME
+                );
+            }
+        }
+    }
+
+    /// Geometry lists shrink under miri: the schedules and the oracle are
+    /// the same code at every size, and the quadratic direct DFT has no
+    /// business running there.
+    fn agreement_sizes() -> &'static [usize] {
+        if cfg!(miri) {
+            &[1, 2, 4, 8]
+        } else {
+            &[1, 2, 4, 8, 16, 32, 64, 256, 1024]
+        }
+    }
+
+    fn dft_sizes() -> &'static [usize] {
+        if cfg!(miri) { &[8, 32] } else { &[256, 1024] }
+    }
+
+    fn lane_widths() -> &'static [usize] {
+        if cfg!(miri) {
+            &[1, 2, 4]
+        } else {
+            &[1, 2, 4, 16]
+        }
+    }
+
+    #[test]
+    fn goldilocks_schedules_agree_below_the_packed_defect() {
+        for &size in agreement_sizes() {
+            for &lanes in lane_widths() {
+                // The recorded defect fires nondeterministically once a
+                // Goldilocks buffer reaches 256 elements; stay strictly
+                // below it so the comparison targets schedule equivalence,
+                // not the upstream kernel.
+                if size * lanes >= 256 {
+                    continue;
+                }
+                check_schedules_agree::<Goldilocks>(
+                    size,
+                    lanes,
+                    0x0f0f_1e2d ^ (size as u64) << 32 ^ lanes as u64,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn goldilocks_fused_matches_direct_dft_at_wide_geometries() {
+        for &size in dft_sizes() {
+            for &lanes in lane_widths() {
+                check_fused_matches_direct_dft::<Goldilocks>(
+                    size,
+                    lanes,
+                    0x5eed_1234 ^ (size as u64) << 32 ^ lanes as u64,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn quad_mersenne31_schedules_agree() {
+        for &size in agreement_sizes() {
+            for &lanes in lane_widths() {
+                check_schedules_agree::<QuadMersenne31>(
+                    size,
+                    lanes,
+                    0x0bad_c0de ^ (size as u64) << 32 ^ lanes as u64,
+                );
+            }
+        }
+    }
 }
