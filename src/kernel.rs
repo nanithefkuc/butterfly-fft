@@ -880,4 +880,82 @@ mod tests {
         );
         differential_backend_trivial_coefficients::<Gf16, NeonBackend<Gf16>>("neon");
     }
+
+    /// The tier entries of a field without dedicated butterflies inherit the
+    /// portable scalar kernels: every default body must agree with `scalar`
+    /// in both directions. Capability probes are test-local so the GFNI and
+    /// NEON entries skip, rather than panic, on hosts without the tier.
+    #[cfg(all(
+        feature = "simd",
+        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn kernelless_field_tier_entries_inherit_scalar() {
+        use archmage::SimdToken;
+
+        fn entries_match_scalar<F: TierButterflies>(
+            label: &str,
+            coefficient: F::Elem,
+            mut forward: impl FnMut(&mut [u8], &mut [u8], F::Elem),
+            mut inverse: impl FnMut(&mut [u8], &mut [u8], F::Elem),
+        ) {
+            for len in [0usize, 1, 15, 16, 33] {
+                let mut low = pattern(0x91, len * F::BYTES);
+                let mut high = pattern(0x5c, len * F::BYTES);
+                let (mut want_low, mut want_high) = (low.clone(), high.clone());
+                scalar::fused_forward::<F>(&mut want_low, &mut want_high, coefficient);
+                forward(&mut low, &mut high, coefficient);
+                assert_eq!(low, want_low, "{label} forward low at len {len}");
+                assert_eq!(high, want_high, "{label} forward high at len {len}");
+
+                let mut low = pattern(0x91, len * F::BYTES);
+                let mut high = pattern(0x5c, len * F::BYTES);
+                let (mut want_low, mut want_high) = (low.clone(), high.clone());
+                scalar::fused_inverse::<F>(&mut want_low, &mut want_high, coefficient);
+                inverse(&mut low, &mut high, coefficient);
+                assert_eq!(low, want_low, "{label} inverse low at len {len}");
+                assert_eq!(high, want_high, "{label} inverse high at len {len}");
+            }
+        }
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if let Some(token) = archmage::X64V3GfniCryptoToken::summon() {
+                entries_match_scalar::<Gf32>(
+                    "gfni defaults",
+                    <Gf32 as Field>::Elem::ONE,
+                    |low, high, c| Gf32::fused_forward_gfni(token, low, high, c),
+                    |low, high, c| Gf32::fused_inverse_gfni(token, low, high, c),
+                );
+            }
+            if let Some(token) = archmage::X64V3Token::summon() {
+                entries_match_scalar::<Gf32>(
+                    "avx2 defaults",
+                    <Gf32 as Field>::Elem::ZERO,
+                    |low, high, c| Gf32::fused_forward_avx2(token, low, high, c),
+                    |low, high, c| Gf32::fused_inverse_avx2(token, low, high, c),
+                );
+            }
+            if let Some(token) = archmage::X64V2Token::summon() {
+                entries_match_scalar::<Gf32>(
+                    "ssse3 defaults",
+                    <Gf32 as Field>::Elem::ONE,
+                    |low, high, c| Gf32::fused_forward_ssse3(token, low, high, c),
+                    |low, high, c| Gf32::fused_inverse_ssse3(token, low, high, c),
+                );
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            if let Some(token) = archmage::NeonToken::summon() {
+                entries_match_scalar::<Gf32>(
+                    "neon defaults",
+                    <Gf32 as Field>::Elem::ONE,
+                    |low, high, c| Gf32::fused_forward_neon(token, low, high, c),
+                    |low, high, c| Gf32::fused_inverse_neon(token, low, high, c),
+                );
+            }
+        }
+    }
 }
