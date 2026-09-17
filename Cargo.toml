@@ -17,8 +17,9 @@ default = ["std", "simd"]
 # `simdispatch` runtime detection selected by `simd`.
 std = ["fgf/std"]
 # Runtime-dispatched SIMD butterfly kernels (v3_gfni_crypto / v3 / v2 on x86,
-# neon on AArch64). Disabling leaves the portable scalar backend.
-simd = ["std", "fgf/simd"]
+# neon on AArch64), as safe `archmage` capability-token functions. Disabling
+# leaves the portable scalar backend.
+simd = ["std", "fgf/simd", "dep:archmage"]
 # Expose unstable implementation APIs for experimentation and downstream
 # tuning. Exempt from this crate's compatibility guarantees.
 internals = []
@@ -28,6 +29,10 @@ internals = []
 # registry at the exact release `fgf` resolves, so both crates compile one
 # `simdispatch` and share its `Backend` type and `SIMD_BACKEND` ladder.
 simdispatch = { version = "=0.1.0", default-features = false }
+# Capability tokens for the butterfly kernels, owned by `simd` (the feature
+# that compiles the kernels naming them), at the exact release `fgf` resolves
+# so both crates compile one `archmage`.
+archmage = { version = "0.9.29", optional = true }
 fgf = { version = "=1.1.0", default-features = false }
 
 [dev-dependencies]

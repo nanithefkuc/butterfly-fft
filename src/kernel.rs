@@ -28,10 +28,8 @@
 //! same NEON kernels as the plain [`Backend::Neon`] tier; only the reported
 //! tier label differs.
 
-// Unsafe is expected and confined here: this module owns every intrinsic in
-// the crate, all behind runtime feature detection. The rest of the crate
-// keeps `#![warn(unsafe_code)]`.
-#![allow(unsafe_code)]
+// Every SIMD kernel is a safe `archmage` capability-token function; the crate
+// is `#![deny(unsafe_code)]` and this module owns no unsafe surface.
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
 mod aarch64;
@@ -54,6 +52,12 @@ pub use fgf::kernel::Backend;
 // reports `Scalar`.
 #[cfg(feature = "simd")]
 use simdispatch::Selection;
+// `summon()` is the `SimdToken` trait's capability probe.
+#[cfg(all(
+    feature = "simd",
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+))]
+use archmage::SimdToken;
 
 /// The tiers `butterfly-fft` implements butterfly kernels for, in
 /// detection-preference order: the shared ladder minus `V1` (the shuffle
@@ -100,6 +104,82 @@ static BACKEND: ::std::sync::LazyLock<Backend> = ::std::sync::LazyLock::new(|| {
         .resolve()
 });
 
+/// Capability tokens for the x86 butterfly tiers, summoned once per process.
+///
+/// Host-capability facts, deliberately separate from the policy
+/// [`Selection`] in [`BACKEND`]: `SIMD_BACKEND` chooses *which* tier's
+/// kernels run, while these prove the host *can* run each tier's kernels —
+/// the direct-kernel differential tests exercise tiers the process override
+/// does not select. The weaker tokens narrow from the strongest one the host
+/// summons, so one probe covers the ladder.
+#[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
+static X86_TOKENS: ::std::sync::LazyLock<X86Tokens> = ::std::sync::LazyLock::new(X86Tokens::summon);
+
+/// The summoned x86 capability tokens; `None` where the host lacks the tier.
+#[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
+struct X86Tokens {
+    v3_gfni_crypto: Option<archmage::X64V3GfniCryptoToken>,
+    v3: Option<archmage::X64V3Token>,
+    v2: Option<archmage::X64V2Token>,
+}
+
+#[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
+impl X86Tokens {
+    fn summon() -> Self {
+        let v3_gfni_crypto = archmage::X64V3GfniCryptoToken::summon();
+        let v3 = v3_gfni_crypto
+            .map(archmage::X64V3GfniCryptoToken::v3)
+            .or_else(archmage::X64V3Token::summon);
+        let v2 = v3
+            .map(archmage::X64V3Token::v2)
+            .or_else(archmage::X64V2Token::summon);
+        Self {
+            v3_gfni_crypto,
+            v3,
+            v2,
+        }
+    }
+}
+
+/// The NEON capability token, summoned once per process.
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+static NEON_TOKEN: ::std::sync::LazyLock<Option<archmage::NeonToken>> =
+    ::std::sync::LazyLock::new(|| archmage::NeonToken::summon());
+
+/// The GFNI proof for the GFNI butterfly kernels.
+#[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
+#[inline]
+fn v3_gfni_crypto_token() -> archmage::X64V3GfniCryptoToken {
+    X86_TOKENS
+        .v3_gfni_crypto
+        .expect("GFNI butterflies reached on a host without the GFNI token")
+}
+
+/// The AVX2 proof for the AVX2 butterfly kernels.
+#[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
+#[inline]
+fn v3_token() -> archmage::X64V3Token {
+    X86_TOKENS
+        .v3
+        .expect("AVX2 butterflies reached on a host without the V3 token")
+}
+
+/// The SSSE3 proof for the SSSE3 butterfly kernels.
+#[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
+#[inline]
+fn v2_token() -> archmage::X64V2Token {
+    X86_TOKENS
+        .v2
+        .expect("SSSE3 butterflies reached on a host without the V2 token")
+}
+
+/// The NEON proof for the NEON butterfly kernels.
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[inline]
+fn neon_token() -> archmage::NeonToken {
+    NEON_TOKEN.expect("NEON butterflies reached on a host without the NEON token")
+}
+
 /// The backend used for field `F`: the cached process backend ([`backend()`],
 /// already resolved and override-adjusted over [`BUTTERFLY_FFT_TIERS`]) narrowed
 /// to the tiers that field's butterfly kernels implement
@@ -120,9 +200,6 @@ pub fn backend_for<F: ButterflyKernels>() -> Backend {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) struct RawDispatch;
-
 mod private {
     pub trait Sealed {}
 }
@@ -135,8 +212,8 @@ mod private {
 /// is fixed by the implementation. Fields without dedicated
 /// kernels inherit the portable scalar backend, which is why every
 /// transform works over every implementor. External code holds this bound
-/// but cannot construct the private `RawDispatch` proof the kernel
-/// entries require.
+/// but cannot name the private `TierButterflies` supertrait the per-tier
+/// kernel entries live on.
 #[allow(private_bounds)]
 pub trait ButterflyKernels: FieldKernels + private::Sealed + TierButterflies {
     /// The tiers this field's butterfly kernels implement, used to narrow
@@ -145,9 +222,10 @@ pub trait ButterflyKernels: FieldKernels + private::Sealed + TierButterflies {
     const BUTTERFLY_TIERS: &'static [Backend] = &[Backend::Scalar];
 }
 
-/// The per-tier kernel entries, sealed behind the private `RawDispatch`
-/// proof: the dispatch layer constructs the proof after runtime detection,
-/// and nothing else in the crate — or outside it — can.
+/// The per-tier kernel entries, reachable only through the private
+/// supertrait bound: each entry takes the genuine `archmage` capability
+/// token its kernel's instructions require, summoned once and cached by the
+/// dispatch layer ([`X86_TOKENS`], [`NEON_TOKEN`]).
 ///
 /// # Preconditions
 ///
@@ -156,7 +234,7 @@ pub(crate) trait TierButterflies: Field {
     /// Fused forward butterfly, AVX2+GFNI kernel.
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     fn fused_forward_gfni(
-        _proof: RawDispatch,
+        _token: archmage::X64V3GfniCryptoToken,
         low: &mut [u8],
         high: &mut [u8],
         coefficient: Self::Elem,
@@ -167,7 +245,7 @@ pub(crate) trait TierButterflies: Field {
     /// Fused inverse butterfly, AVX2+GFNI kernel.
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     fn fused_inverse_gfni(
-        _proof: RawDispatch,
+        _token: archmage::X64V3GfniCryptoToken,
         low: &mut [u8],
         high: &mut [u8],
         coefficient: Self::Elem,
@@ -178,7 +256,7 @@ pub(crate) trait TierButterflies: Field {
     /// Fused forward butterfly, AVX2 kernel.
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     fn fused_forward_avx2(
-        _proof: RawDispatch,
+        _token: archmage::X64V3Token,
         low: &mut [u8],
         high: &mut [u8],
         coefficient: Self::Elem,
@@ -189,7 +267,7 @@ pub(crate) trait TierButterflies: Field {
     /// Fused inverse butterfly, AVX2 kernel.
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     fn fused_inverse_avx2(
-        _proof: RawDispatch,
+        _token: archmage::X64V3Token,
         low: &mut [u8],
         high: &mut [u8],
         coefficient: Self::Elem,
@@ -200,7 +278,7 @@ pub(crate) trait TierButterflies: Field {
     /// Fused forward butterfly, SSSE3 kernel.
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     fn fused_forward_ssse3(
-        _proof: RawDispatch,
+        _token: archmage::X64V2Token,
         low: &mut [u8],
         high: &mut [u8],
         coefficient: Self::Elem,
@@ -211,7 +289,7 @@ pub(crate) trait TierButterflies: Field {
     /// Fused inverse butterfly, SSSE3 kernel.
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     fn fused_inverse_ssse3(
-        _proof: RawDispatch,
+        _token: archmage::X64V2Token,
         low: &mut [u8],
         high: &mut [u8],
         coefficient: Self::Elem,
@@ -222,7 +300,7 @@ pub(crate) trait TierButterflies: Field {
     /// Fused forward butterfly, NEON kernel.
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
     fn fused_forward_neon(
-        _proof: RawDispatch,
+        _token: archmage::NeonToken,
         low: &mut [u8],
         high: &mut [u8],
         coefficient: Self::Elem,
@@ -233,7 +311,7 @@ pub(crate) trait TierButterflies: Field {
     /// Fused inverse butterfly, NEON kernel.
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
     fn fused_inverse_neon(
-        _proof: RawDispatch,
+        _token: archmage::NeonToken,
         low: &mut [u8],
         high: &mut [u8],
         coefficient: Self::Elem,
@@ -276,12 +354,12 @@ pub(crate) struct GfniBackend<F>(PhantomData<fn() -> F>);
 impl<F: TierButterflies> ButterflyBackend<F> for GfniBackend<F> {
     #[inline]
     fn forward_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        F::fused_forward_gfni(RawDispatch, low, high, coefficient);
+        F::fused_forward_gfni(v3_gfni_crypto_token(), low, high, coefficient);
     }
 
     #[inline]
     fn inverse_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        F::fused_inverse_gfni(RawDispatch, low, high, coefficient);
+        F::fused_inverse_gfni(v3_gfni_crypto_token(), low, high, coefficient);
     }
 }
 
@@ -292,12 +370,12 @@ pub(crate) struct Avx2Backend<F>(PhantomData<fn() -> F>);
 impl<F: TierButterflies> ButterflyBackend<F> for Avx2Backend<F> {
     #[inline]
     fn forward_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        F::fused_forward_avx2(RawDispatch, low, high, coefficient);
+        F::fused_forward_avx2(v3_token(), low, high, coefficient);
     }
 
     #[inline]
     fn inverse_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        F::fused_inverse_avx2(RawDispatch, low, high, coefficient);
+        F::fused_inverse_avx2(v3_token(), low, high, coefficient);
     }
 }
 
@@ -308,12 +386,12 @@ pub(crate) struct Ssse3Backend<F>(PhantomData<fn() -> F>);
 impl<F: TierButterflies> ButterflyBackend<F> for Ssse3Backend<F> {
     #[inline]
     fn forward_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        F::fused_forward_ssse3(RawDispatch, low, high, coefficient);
+        F::fused_forward_ssse3(v2_token(), low, high, coefficient);
     }
 
     #[inline]
     fn inverse_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        F::fused_inverse_ssse3(RawDispatch, low, high, coefficient);
+        F::fused_inverse_ssse3(v2_token(), low, high, coefficient);
     }
 }
 
@@ -324,12 +402,12 @@ pub(crate) struct NeonBackend<F>(PhantomData<fn() -> F>);
 impl<F: TierButterflies> ButterflyBackend<F> for NeonBackend<F> {
     #[inline]
     fn forward_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        F::fused_forward_neon(RawDispatch, low, high, coefficient);
+        F::fused_forward_neon(neon_token(), low, high, coefficient);
     }
 
     #[inline]
     fn inverse_nonzero(low: &mut [u8], high: &mut [u8], coefficient: F::Elem) {
-        F::fused_inverse_neon(RawDispatch, low, high, coefficient);
+        F::fused_inverse_neon(neon_token(), low, high, coefficient);
     }
 }
 

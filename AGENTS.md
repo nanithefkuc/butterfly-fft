@@ -40,16 +40,35 @@ Rust imports use the package's library identifier, `butterfly_fft`.
    details.
 7. **Kernel ownership.** Every intrinsic belongs under `src/kernel`. The
    per-tier kernel entries live on the crate-private `TierButterflies`
-   trait, sealed behind the private `RawDispatch` proof; the public
-   `ButterflyKernels` trait carries no `unsafe` surface. Every SIMD forward
+   trait, sealed by the private `Sealed` supertrait bound, and take the
+   genuine `archmage` capability token their instructions require —
+   summoned once per process into the cached token bank (`X86_TOKENS`,
+   `NEON_TOKEN`) and never forged. Every kernel is a safe `#[arcane]`
+   function over reference-based loads and stores; the public
+   `ButterflyKernels` trait carries no unsafe surface. Every SIMD forward
    and inverse kernel is differentially tested against scalar field
    arithmetic, including tails, zero/one factors, and nontrivial factors.
+
 8. **Sysroot paths.** Sysroot paths in crate code are written absolutely
    (`::core::...`, `::std::...`); CI enforces the form.
 9. **Feature discipline.** The crate is `no_std` plus `alloc` without default
    features. New code must not reach for `std` outside `#[cfg(feature = "std")]`.
 10. **Documentation.** Public items stay documented and
     `cargo doc --all-features` remains warning-free.
+
+
+## Unsafe residue ledger
+
+The crate is `#![deny(unsafe_code)]` and owns no unsafe surface: every SIMD
+kernel is a safe `archmage` capability-token function, and nothing in `src/`
+falls into the sanctioned residue classes (offset-addressed rows,
+uninitialized scratch, non-temporal or aligned-only stores, provider
+callbacks). The only unsafe in the repository is the `GlobalAlloc` impl in
+`tests/zero_alloc.rs` (trait-mandated, test-only) and the C-FFI bindings in
+the excluded `benchmarks/afft` project.
+
+When a change introduces a survivor, it carries a per-item
+`#[allow(unsafe_code)]`, a full SINCE–THUS proof, and an entry here.
 
 ## Backend selection
 

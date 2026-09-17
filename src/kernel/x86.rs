@@ -11,13 +11,15 @@
 //!   GF(2^16) uses four base-field tables with the same swap trick.
 //! - **SSSE3**: the AVX2 scheme over 16-byte lanes.
 //!
-//! All kernels are unaligned (`loadu`/`storeu`) and delegate sub-vector
-//! tails to the portable scalar implementation.
+//! Every kernel is a safe [`archmage`] capability-token function taking the
+//! exact token its instructions require (`X64V3Token` for AVX2, `X64V2Token`
+//! for SSSE3), walking the halves with reference-based loads and stores over
+//! chunk arrays; the lane builders are `#[rite]` helpers. Sub-lane tails go
+//! to the portable scalar kernels on an element boundary.
+//!
+//! [`archmage`]: https://docs.rs/archmage
 
 #![allow(clippy::incompatible_msrv)]
-// All vector accesses go through `loadu`/`storeu`, so pointer-to-vector
-// casts never rely on alignment.
-#![allow(clippy::cast_ptr_alignment)]
 
 #[cfg(target_arch = "x86")]
 use ::core::arch::x86::*;
@@ -29,27 +31,25 @@ use fgf::{Gf8B, Gf16, gf8b, gf16};
 use super::scalar;
 
 /// Adjacent-byte swap mask for the interleaved GF(2^16) component trick.
-const SWAP_ADJACENT: [u8; 32] = [
-    1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14, 1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13,
-    12, 15, 14,
-];
+///
+/// Sixteen bytes; the 32-byte lanes broadcast it to both halves.
+const SWAP_ADJACENT: [u8; 16] = [1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14];
 
-/// Split-nibble multiply table for one GF(2^8) coefficient, both AVX2 lanes.
+/// Split-nibble multiply table for one GF(2^8) coefficient.
+///
+/// Sixteen entries per half; AVX2 lanes use each half broadcast to both
+/// 128-bit lanes of the 32-byte registers.
 struct ScaleTable {
-    low: [u8; 32],
-    high: [u8; 32],
+    low: [u8; 16],
+    high: [u8; 16],
 }
 
 fn scale_table(coefficient: gf8b::Elem) -> ScaleTable {
-    let mut low = [0; 32];
-    let mut high = [0; 32];
+    let mut low = [0; 16];
+    let mut high = [0; 16];
     for nibble in 0..16u8 {
         low[nibble as usize] = gf8b::Elem::from_raw(nibble).mul(coefficient).to_raw();
         high[nibble as usize] = gf8b::Elem::from_raw(nibble << 4).mul(coefficient).to_raw();
-    }
-    for nibble in 0..16 {
-        low[16 + nibble] = low[nibble];
-        high[16 + nibble] = high[nibble];
     }
     ScaleTable { low, high }
 }
@@ -77,34 +77,29 @@ fn factor_tables(coefficient: gf16::Elem) -> [ScaleTable; 4] {
     ]
 }
 
-#[target_feature(enable = "avx2")]
-unsafe fn multiply_avx2(value: __m256i, table: &ScaleTable) -> __m256i {
+/// `value * coefficient` per GF(2^8) lane via the split-nibble tables, AVX2
+/// form.
+#[archmage::rite(v3, import_intrinsics)]
+fn multiply_avx2(value: __m256i, table: &ScaleTable) -> __m256i {
     let low_nibbles = _mm256_and_si256(value, _mm256_set1_epi8(0x0f));
     let high_nibbles = _mm256_and_si256(_mm256_srli_epi16::<4>(value), _mm256_set1_epi8(0x0f));
-    // SAFETY: table arrays are 32 bytes; unaligned loads are allowed.
-    let (low_table, high_table) = unsafe {
-        (
-            _mm256_loadu_si256(table.low.as_ptr().cast::<__m256i>()),
-            _mm256_loadu_si256(table.high.as_ptr().cast::<__m256i>()),
-        )
-    };
+    let (low_table, high_table) = (
+        _mm256_broadcastsi128_si256(_mm_loadu_si128(&table.low)),
+        _mm256_broadcastsi128_si256(_mm_loadu_si128(&table.high)),
+    );
     _mm256_xor_si256(
         _mm256_shuffle_epi8(low_table, low_nibbles),
         _mm256_shuffle_epi8(high_table, high_nibbles),
     )
 }
 
-#[target_feature(enable = "ssse3")]
-unsafe fn multiply_ssse3(value: __m128i, table: &ScaleTable) -> __m128i {
+/// `value * coefficient` per GF(2^8) lane via the split-nibble tables, SSSE3
+/// form.
+#[archmage::rite(v2, import_intrinsics)]
+fn multiply_ssse3(value: __m128i, table: &ScaleTable) -> __m128i {
     let low_nibbles = _mm_and_si128(value, _mm_set1_epi8(0x0f));
     let high_nibbles = _mm_and_si128(_mm_srli_epi16::<4>(value), _mm_set1_epi8(0x0f));
-    // SAFETY: table arrays are at least 16 bytes; unaligned loads are allowed.
-    let (low_table, high_table) = unsafe {
-        (
-            _mm_loadu_si128(table.low.as_ptr().cast::<__m128i>()),
-            _mm_loadu_si128(table.high.as_ptr().cast::<__m128i>()),
-        )
-    };
+    let (low_table, high_table) = (_mm_loadu_si128(&table.low), _mm_loadu_si128(&table.high));
     _mm_xor_si128(
         _mm_shuffle_epi8(low_table, low_nibbles),
         _mm_shuffle_epi8(high_table, high_nibbles),
@@ -112,21 +107,17 @@ unsafe fn multiply_ssse3(value: __m128i, table: &ScaleTable) -> __m128i {
 }
 
 /// `source * coefficient` for interleaved GF(2^16) elements, AVX2 form.
-#[target_feature(enable = "avx2")]
-unsafe fn scaled_vector_avx2(source: __m256i, tables: &[ScaleTable; 4]) -> __m256i {
-    // SAFETY: the mask constant is 32 bytes; unaligned load is allowed.
-    let swap_mask = unsafe { _mm256_loadu_si256(SWAP_ADJACENT.as_ptr().cast::<__m256i>()) };
+#[archmage::rite(v3, import_intrinsics)]
+fn scaled_vector_avx2(source: __m256i, tables: &[ScaleTable; 4]) -> __m256i {
+    let swap_mask = _mm256_broadcastsi128_si256(_mm_loadu_si128(&SWAP_ADJACENT));
     let swapped = _mm256_shuffle_epi8(source, swap_mask);
     let even_mask = _mm256_set1_epi16(0x00ff);
-    // SAFETY: AVX2 is enabled by the enclosing target_feature.
-    let (direct_even, direct_odd, cross_even, cross_odd) = unsafe {
-        (
-            multiply_avx2(source, &tables[0]),
-            multiply_avx2(source, &tables[1]),
-            multiply_avx2(swapped, &tables[2]),
-            multiply_avx2(swapped, &tables[3]),
-        )
-    };
+    let (direct_even, direct_odd, cross_even, cross_odd) = (
+        multiply_avx2(source, &tables[0]),
+        multiply_avx2(source, &tables[1]),
+        multiply_avx2(swapped, &tables[2]),
+        multiply_avx2(swapped, &tables[3]),
+    );
     let direct = _mm256_xor_si256(
         _mm256_and_si256(direct_even, even_mask),
         _mm256_andnot_si256(even_mask, direct_odd),
@@ -139,21 +130,17 @@ unsafe fn scaled_vector_avx2(source: __m256i, tables: &[ScaleTable; 4]) -> __m25
 }
 
 /// `source * coefficient` for interleaved GF(2^16) elements, SSSE3 form.
-#[target_feature(enable = "ssse3")]
-unsafe fn scaled_vector_ssse3(source: __m128i, tables: &[ScaleTable; 4]) -> __m128i {
-    // SAFETY: the mask constant is at least 16 bytes; unaligned load allowed.
-    let swap_mask = unsafe { _mm_loadu_si128(SWAP_ADJACENT.as_ptr().cast::<__m128i>()) };
+#[archmage::rite(v2, import_intrinsics)]
+fn scaled_vector_ssse3(source: __m128i, tables: &[ScaleTable; 4]) -> __m128i {
+    let swap_mask = _mm_loadu_si128(&SWAP_ADJACENT);
     let swapped = _mm_shuffle_epi8(source, swap_mask);
     let even_mask = _mm_set1_epi16(0x00ff);
-    // SAFETY: SSSE3 is enabled by the enclosing target_feature.
-    let (direct_even, direct_odd, cross_even, cross_odd) = unsafe {
-        (
-            multiply_ssse3(source, &tables[0]),
-            multiply_ssse3(source, &tables[1]),
-            multiply_ssse3(swapped, &tables[2]),
-            multiply_ssse3(swapped, &tables[3]),
-        )
-    };
+    let (direct_even, direct_odd, cross_even, cross_odd) = (
+        multiply_ssse3(source, &tables[0]),
+        multiply_ssse3(source, &tables[1]),
+        multiply_ssse3(swapped, &tables[2]),
+        multiply_ssse3(swapped, &tables[3]),
+    );
     let direct = _mm_xor_si128(
         _mm_and_si128(direct_even, even_mask),
         _mm_andnot_si128(even_mask, direct_odd),
@@ -169,256 +156,200 @@ unsafe fn scaled_vector_ssse3(source: __m128i, tables: &[ScaleTable; 4]) -> __m1
 // GF(2^8) fused butterflies
 // ---------------------------------------------------------------------------
 
-#[target_feature(enable = "avx2")]
-pub(super) unsafe fn gf8_fused_forward_avx2(
+/// Fused forward butterfly over 32-byte AVX2 lanes, GF(2^8) coefficients.
+#[allow(clippy::used_underscore_binding)]
+#[archmage::arcane(import_intrinsics)]
+pub(super) fn gf8_fused_forward_avx2(
+    _token: archmage::X64V3Token,
     low: &mut [u8],
     high: &mut [u8],
     coefficient: gf8b::Elem,
 ) {
     let table = scale_table(coefficient);
-    let vector_len = low.len() / 32 * 32;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 32 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                _mm256_loadu_si256(low.as_ptr().add(offset).cast::<__m256i>()),
-                _mm256_loadu_si256(high.as_ptr().add(offset).cast::<__m256i>()),
-            )
-        };
-        // SAFETY: AVX2 is enabled by the enclosing target_feature.
-        let scaled = unsafe { multiply_avx2(h, &table) };
+    let (low_lanes, low_tail) = low.as_chunks_mut::<32>();
+    let (high_lanes, high_tail) = high.as_chunks_mut::<32>();
+    for (low_lane, high_lane) in low_lanes.iter_mut().zip(high_lanes) {
+        let l = _mm256_loadu_si256(&*low_lane);
+        let h = _mm256_loadu_si256(&*high_lane);
+        let scaled = multiply_avx2(h, &table);
         let new_low = _mm256_xor_si256(l, scaled);
         let new_high = _mm256_xor_si256(h, new_low);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            _mm256_storeu_si256(low.as_mut_ptr().add(offset).cast::<__m256i>(), new_low);
-            _mm256_storeu_si256(high.as_mut_ptr().add(offset).cast::<__m256i>(), new_high);
-        }
-        offset += 32;
+        _mm256_storeu_si256(low_lane, new_low);
+        _mm256_storeu_si256(high_lane, new_high);
     }
-    scalar::fused_forward::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_forward::<Gf8B>(low_tail, high_tail, coefficient);
 }
 
-#[target_feature(enable = "avx2")]
-pub(super) unsafe fn gf8_fused_inverse_avx2(
+/// Fused inverse butterfly over 32-byte AVX2 lanes, GF(2^8) coefficients.
+#[allow(clippy::used_underscore_binding)]
+#[archmage::arcane(import_intrinsics)]
+pub(super) fn gf8_fused_inverse_avx2(
+    _token: archmage::X64V3Token,
     low: &mut [u8],
     high: &mut [u8],
     coefficient: gf8b::Elem,
 ) {
     let table = scale_table(coefficient);
-    let vector_len = low.len() / 32 * 32;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 32 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                _mm256_loadu_si256(low.as_ptr().add(offset).cast::<__m256i>()),
-                _mm256_loadu_si256(high.as_ptr().add(offset).cast::<__m256i>()),
-            )
-        };
+    let (low_lanes, low_tail) = low.as_chunks_mut::<32>();
+    let (high_lanes, high_tail) = high.as_chunks_mut::<32>();
+    for (low_lane, high_lane) in low_lanes.iter_mut().zip(high_lanes) {
+        let l = _mm256_loadu_si256(&*low_lane);
+        let h = _mm256_loadu_si256(&*high_lane);
         let new_high = _mm256_xor_si256(h, l);
-        // SAFETY: AVX2 is enabled by the enclosing target_feature.
-        let scaled = unsafe { multiply_avx2(new_high, &table) };
+        let scaled = multiply_avx2(new_high, &table);
         let new_low = _mm256_xor_si256(l, scaled);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            _mm256_storeu_si256(low.as_mut_ptr().add(offset).cast::<__m256i>(), new_low);
-            _mm256_storeu_si256(high.as_mut_ptr().add(offset).cast::<__m256i>(), new_high);
-        }
-        offset += 32;
+        _mm256_storeu_si256(low_lane, new_low);
+        _mm256_storeu_si256(high_lane, new_high);
     }
-    scalar::fused_inverse::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_inverse::<Gf8B>(low_tail, high_tail, coefficient);
 }
 
-#[target_feature(enable = "ssse3")]
-pub(super) unsafe fn gf8_fused_forward_ssse3(
+/// Fused forward butterfly over 16-byte SSSE3 lanes, GF(2^8) coefficients.
+#[allow(clippy::used_underscore_binding)]
+#[archmage::arcane(import_intrinsics)]
+pub(super) fn gf8_fused_forward_ssse3(
+    _token: archmage::X64V2Token,
     low: &mut [u8],
     high: &mut [u8],
     coefficient: gf8b::Elem,
 ) {
     let table = scale_table(coefficient);
-    let vector_len = low.len() / 16 * 16;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 16 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                _mm_loadu_si128(low.as_ptr().add(offset).cast::<__m128i>()),
-                _mm_loadu_si128(high.as_ptr().add(offset).cast::<__m128i>()),
-            )
-        };
-        // SAFETY: SSSE3 is enabled by the enclosing target_feature.
-        let scaled = unsafe { multiply_ssse3(h, &table) };
+    let (low_lanes, low_tail) = low.as_chunks_mut::<16>();
+    let (high_lanes, high_tail) = high.as_chunks_mut::<16>();
+    for (low_lane, high_lane) in low_lanes.iter_mut().zip(high_lanes) {
+        let l = _mm_loadu_si128(&*low_lane);
+        let h = _mm_loadu_si128(&*high_lane);
+        let scaled = multiply_ssse3(h, &table);
         let new_low = _mm_xor_si128(l, scaled);
         let new_high = _mm_xor_si128(h, new_low);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            _mm_storeu_si128(low.as_mut_ptr().add(offset).cast::<__m128i>(), new_low);
-            _mm_storeu_si128(high.as_mut_ptr().add(offset).cast::<__m128i>(), new_high);
-        }
-        offset += 16;
+        _mm_storeu_si128(low_lane, new_low);
+        _mm_storeu_si128(high_lane, new_high);
     }
-    scalar::fused_forward::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_forward::<Gf8B>(low_tail, high_tail, coefficient);
 }
 
-#[target_feature(enable = "ssse3")]
-pub(super) unsafe fn gf8_fused_inverse_ssse3(
+/// Fused inverse butterfly over 16-byte SSSE3 lanes, GF(2^8) coefficients.
+#[allow(clippy::used_underscore_binding)]
+#[archmage::arcane(import_intrinsics)]
+pub(super) fn gf8_fused_inverse_ssse3(
+    _token: archmage::X64V2Token,
     low: &mut [u8],
     high: &mut [u8],
     coefficient: gf8b::Elem,
 ) {
     let table = scale_table(coefficient);
-    let vector_len = low.len() / 16 * 16;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 16 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                _mm_loadu_si128(low.as_ptr().add(offset).cast::<__m128i>()),
-                _mm_loadu_si128(high.as_ptr().add(offset).cast::<__m128i>()),
-            )
-        };
+    let (low_lanes, low_tail) = low.as_chunks_mut::<16>();
+    let (high_lanes, high_tail) = high.as_chunks_mut::<16>();
+    for (low_lane, high_lane) in low_lanes.iter_mut().zip(high_lanes) {
+        let l = _mm_loadu_si128(&*low_lane);
+        let h = _mm_loadu_si128(&*high_lane);
         let new_high = _mm_xor_si128(h, l);
-        // SAFETY: SSSE3 is enabled by the enclosing target_feature.
-        let scaled = unsafe { multiply_ssse3(new_high, &table) };
+        let scaled = multiply_ssse3(new_high, &table);
         let new_low = _mm_xor_si128(l, scaled);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            _mm_storeu_si128(low.as_mut_ptr().add(offset).cast::<__m128i>(), new_low);
-            _mm_storeu_si128(high.as_mut_ptr().add(offset).cast::<__m128i>(), new_high);
-        }
-        offset += 16;
+        _mm_storeu_si128(low_lane, new_low);
+        _mm_storeu_si128(high_lane, new_high);
     }
-    scalar::fused_inverse::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_inverse::<Gf8B>(low_tail, high_tail, coefficient);
 }
 
 // ---------------------------------------------------------------------------
 // GF(2^16) fused butterflies
 // ---------------------------------------------------------------------------
 
-#[target_feature(enable = "avx2")]
-pub(super) unsafe fn gf16_fused_forward_avx2(
+/// Fused forward butterfly over 32-byte AVX2 lanes, GF(2^16) coefficients.
+#[allow(clippy::used_underscore_binding)]
+#[archmage::arcane(import_intrinsics)]
+pub(super) fn gf16_fused_forward_avx2(
+    _token: archmage::X64V3Token,
     low: &mut [u8],
     high: &mut [u8],
     coefficient: gf16::Elem,
 ) {
     let tables = factor_tables(coefficient);
-    let vector_len = low.len() / 32 * 32;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 32 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                _mm256_loadu_si256(low.as_ptr().add(offset).cast::<__m256i>()),
-                _mm256_loadu_si256(high.as_ptr().add(offset).cast::<__m256i>()),
-            )
-        };
-        // SAFETY: AVX2 is enabled by the enclosing target_feature.
-        let scaled = unsafe { scaled_vector_avx2(h, &tables) };
+    let (low_lanes, low_tail) = low.as_chunks_mut::<32>();
+    let (high_lanes, high_tail) = high.as_chunks_mut::<32>();
+    for (low_lane, high_lane) in low_lanes.iter_mut().zip(high_lanes) {
+        let l = _mm256_loadu_si256(&*low_lane);
+        let h = _mm256_loadu_si256(&*high_lane);
+        let scaled = scaled_vector_avx2(h, &tables);
         let new_low = _mm256_xor_si256(l, scaled);
         let new_high = _mm256_xor_si256(h, new_low);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            _mm256_storeu_si256(low.as_mut_ptr().add(offset).cast::<__m256i>(), new_low);
-            _mm256_storeu_si256(high.as_mut_ptr().add(offset).cast::<__m256i>(), new_high);
-        }
-        offset += 32;
+        _mm256_storeu_si256(low_lane, new_low);
+        _mm256_storeu_si256(high_lane, new_high);
     }
-    scalar::fused_forward::<Gf16>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_forward::<Gf16>(low_tail, high_tail, coefficient);
 }
 
-#[target_feature(enable = "avx2")]
-pub(super) unsafe fn gf16_fused_inverse_avx2(
+/// Fused inverse butterfly over 32-byte AVX2 lanes, GF(2^16) coefficients.
+#[allow(clippy::used_underscore_binding)]
+#[archmage::arcane(import_intrinsics)]
+pub(super) fn gf16_fused_inverse_avx2(
+    _token: archmage::X64V3Token,
     low: &mut [u8],
     high: &mut [u8],
     coefficient: gf16::Elem,
 ) {
     let tables = factor_tables(coefficient);
-    let vector_len = low.len() / 32 * 32;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 32 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                _mm256_loadu_si256(low.as_ptr().add(offset).cast::<__m256i>()),
-                _mm256_loadu_si256(high.as_ptr().add(offset).cast::<__m256i>()),
-            )
-        };
+    let (low_lanes, low_tail) = low.as_chunks_mut::<32>();
+    let (high_lanes, high_tail) = high.as_chunks_mut::<32>();
+    for (low_lane, high_lane) in low_lanes.iter_mut().zip(high_lanes) {
+        let l = _mm256_loadu_si256(&*low_lane);
+        let h = _mm256_loadu_si256(&*high_lane);
         let new_high = _mm256_xor_si256(h, l);
-        // SAFETY: AVX2 is enabled by the enclosing target_feature.
-        let scaled = unsafe { scaled_vector_avx2(new_high, &tables) };
+        let scaled = scaled_vector_avx2(new_high, &tables);
         let new_low = _mm256_xor_si256(l, scaled);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            _mm256_storeu_si256(low.as_mut_ptr().add(offset).cast::<__m256i>(), new_low);
-            _mm256_storeu_si256(high.as_mut_ptr().add(offset).cast::<__m256i>(), new_high);
-        }
-        offset += 32;
+        _mm256_storeu_si256(low_lane, new_low);
+        _mm256_storeu_si256(high_lane, new_high);
     }
-    scalar::fused_inverse::<Gf16>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_inverse::<Gf16>(low_tail, high_tail, coefficient);
 }
 
-#[target_feature(enable = "ssse3")]
-pub(super) unsafe fn gf16_fused_forward_ssse3(
+/// Fused forward butterfly over 16-byte SSSE3 lanes, GF(2^16) coefficients.
+#[allow(clippy::used_underscore_binding)]
+#[archmage::arcane(import_intrinsics)]
+pub(super) fn gf16_fused_forward_ssse3(
+    _token: archmage::X64V2Token,
     low: &mut [u8],
     high: &mut [u8],
     coefficient: gf16::Elem,
 ) {
     let tables = factor_tables(coefficient);
-    let vector_len = low.len() / 16 * 16;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 16 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                _mm_loadu_si128(low.as_ptr().add(offset).cast::<__m128i>()),
-                _mm_loadu_si128(high.as_ptr().add(offset).cast::<__m128i>()),
-            )
-        };
-        // SAFETY: SSSE3 is enabled by the enclosing target_feature.
-        let scaled = unsafe { scaled_vector_ssse3(h, &tables) };
+    let (low_lanes, low_tail) = low.as_chunks_mut::<16>();
+    let (high_lanes, high_tail) = high.as_chunks_mut::<16>();
+    for (low_lane, high_lane) in low_lanes.iter_mut().zip(high_lanes) {
+        let l = _mm_loadu_si128(&*low_lane);
+        let h = _mm_loadu_si128(&*high_lane);
+        let scaled = scaled_vector_ssse3(h, &tables);
         let new_low = _mm_xor_si128(l, scaled);
         let new_high = _mm_xor_si128(h, new_low);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            _mm_storeu_si128(low.as_mut_ptr().add(offset).cast::<__m128i>(), new_low);
-            _mm_storeu_si128(high.as_mut_ptr().add(offset).cast::<__m128i>(), new_high);
-        }
-        offset += 16;
+        _mm_storeu_si128(low_lane, new_low);
+        _mm_storeu_si128(high_lane, new_high);
     }
-    scalar::fused_forward::<Gf16>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_forward::<Gf16>(low_tail, high_tail, coefficient);
 }
 
-#[target_feature(enable = "ssse3")]
-pub(super) unsafe fn gf16_fused_inverse_ssse3(
+/// Fused inverse butterfly over 16-byte SSSE3 lanes, GF(2^16) coefficients.
+#[allow(clippy::used_underscore_binding)]
+#[archmage::arcane(import_intrinsics)]
+pub(super) fn gf16_fused_inverse_ssse3(
+    _token: archmage::X64V2Token,
     low: &mut [u8],
     high: &mut [u8],
     coefficient: gf16::Elem,
 ) {
     let tables = factor_tables(coefficient);
-    let vector_len = low.len() / 16 * 16;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 16 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                _mm_loadu_si128(low.as_ptr().add(offset).cast::<__m128i>()),
-                _mm_loadu_si128(high.as_ptr().add(offset).cast::<__m128i>()),
-            )
-        };
+    let (low_lanes, low_tail) = low.as_chunks_mut::<16>();
+    let (high_lanes, high_tail) = high.as_chunks_mut::<16>();
+    for (low_lane, high_lane) in low_lanes.iter_mut().zip(high_lanes) {
+        let l = _mm_loadu_si128(&*low_lane);
+        let h = _mm_loadu_si128(&*high_lane);
         let new_high = _mm_xor_si128(h, l);
-        // SAFETY: SSSE3 is enabled by the enclosing target_feature.
-        let scaled = unsafe { scaled_vector_ssse3(new_high, &tables) };
+        let scaled = scaled_vector_ssse3(new_high, &tables);
         let new_low = _mm_xor_si128(l, scaled);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            _mm_storeu_si128(low.as_mut_ptr().add(offset).cast::<__m128i>(), new_low);
-            _mm_storeu_si128(high.as_mut_ptr().add(offset).cast::<__m128i>(), new_high);
-        }
-        offset += 16;
+        _mm_storeu_si128(low_lane, new_low);
+        _mm_storeu_si128(high_lane, new_high);
     }
-    scalar::fused_inverse::<Gf16>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_inverse::<Gf16>(low_tail, high_tail, coefficient);
 }
 
 mod gfni;

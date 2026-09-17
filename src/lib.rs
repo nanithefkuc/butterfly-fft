@@ -1,7 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(feature = "std"), no_std)]
-#![warn(unsafe_code)]
-#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
 #![warn(clippy::pedantic)]
 #![allow(

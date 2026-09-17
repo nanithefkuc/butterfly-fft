@@ -7,6 +7,19 @@ releases follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed (kernels)
+
+- The SIMD butterfly kernels are safe `archmage` capability-token functions:
+  every `#[target_feature] unsafe fn` and pointer-loop in `kernel/x86.rs`,
+  `kernel/x86/gfni.rs`, and `kernel/aarch64.rs` is now a `#[arcane]`
+  function taking the exact token its instructions require
+  (`X64V3GfniCryptoToken`, `X64V3Token`, `X64V2Token`, `NeonToken`), walking
+  the halves with reference-based loads and stores over chunk arrays. The
+  crate-private `RawDispatch` proof is gone — the tokens are the proof — and
+  the crate is now `#![deny(unsafe_code)]` with no unsafe surface and no
+  residue. `archmage` 0.9.29 joins as a dependency of the `simd` feature,
+  at the release `fgf` resolves.
+
 ### Fixed
 
 - `basis::interpolate_bytes_scratch` validates the scratch geometry before

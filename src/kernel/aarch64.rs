@@ -10,8 +10,13 @@
 //!   source and one of its adjacent-byte swap (`VREV16`), with no planar
 //!   conversion.
 //!
-//! All kernels are unaligned (`vld1q`/`vst1q`) and delegate sub-vector
-//! tails to the portable scalar implementation.
+//! Every kernel is a safe [`archmage`] capability-token function taking the
+//! [`NeonToken`], walking the halves with reference-based loads and stores
+//! over chunk arrays; the lane builders are `#[rite]` helpers. Sub-lane
+//! tails go to the portable scalar kernels on an element boundary.
+//!
+//! [`archmage`]: https://docs.rs/archmage
+//! [`NeonToken`]: archmage::NeonToken
 
 #![allow(clippy::incompatible_msrv)]
 
@@ -49,12 +54,8 @@ fn factor_words(coefficient: gf16::Elem) -> (u16, u16) {
 }
 
 /// `value * coefficient` per GF(2^8) lane via the split-nibble tables.
-#[target_feature(enable = "neon")]
-unsafe fn multiply_neon(
-    value: uint8x16_t,
-    low_table: uint8x16_t,
-    high_table: uint8x16_t,
-) -> uint8x16_t {
+#[archmage::rite(neon)]
+fn multiply_neon(value: uint8x16_t, low_table: uint8x16_t, high_table: uint8x16_t) -> uint8x16_t {
     let nibble_mask = vdupq_n_u8(0x0f);
     let low_nibbles = vandq_u8(value, nibble_mask);
     let high_nibbles = vandq_u8(vshrq_n_u8::<4>(value), nibble_mask);
@@ -66,8 +67,8 @@ unsafe fn multiply_neon(
 
 /// Bit-serial GF(2^8) multiply `value * factor` per lane: eight rounds of
 /// mask/add/shift/reduce with the AES polynomial (`0x1B`).
-#[target_feature(enable = "neon")]
-unsafe fn multiply_base_vector(mut value: uint8x16_t, mut factor: uint8x16_t) -> uint8x16_t {
+#[archmage::rite(neon)]
+fn multiply_base_vector(mut value: uint8x16_t, mut factor: uint8x16_t) -> uint8x16_t {
     let mut product = vdupq_n_u8(0);
     let one = vdupq_n_u8(1);
     let high_threshold = vdupq_n_u8(0x7f);
@@ -83,19 +84,12 @@ unsafe fn multiply_base_vector(mut value: uint8x16_t, mut factor: uint8x16_t) ->
 }
 
 /// `source * coefficient` for interleaved GF(2^16) elements.
-#[target_feature(enable = "neon")]
-unsafe fn scaled_vector_neon(
-    source: uint8x16_t,
-    same: uint8x16_t,
-    cross: uint8x16_t,
-) -> uint8x16_t {
-    // SAFETY: NEON is enabled by the enclosing target_feature.
-    let (direct, crossed) = unsafe {
-        (
-            multiply_base_vector(source, same),
-            multiply_base_vector(vrev16q_u8(source), cross),
-        )
-    };
+#[archmage::rite(neon)]
+fn scaled_vector_neon(source: uint8x16_t, same: uint8x16_t, cross: uint8x16_t) -> uint8x16_t {
+    let (direct, crossed) = (
+        multiply_base_vector(source, same),
+        multiply_base_vector(vrev16q_u8(source), cross),
+    );
     veorq_u8(direct, crossed)
 }
 
@@ -103,80 +97,67 @@ unsafe fn scaled_vector_neon(
 // GF(2^8) fused butterflies
 // ---------------------------------------------------------------------------
 
-#[target_feature(enable = "neon")]
-pub(super) unsafe fn gf8_fused_forward_neon(
+/// Fused forward butterfly over 16-byte NEON lanes, GF(2^8) coefficients.
+#[allow(clippy::used_underscore_binding)]
+#[archmage::arcane(import_intrinsics)]
+pub(super) fn gf8_fused_forward_neon(
+    _token: archmage::NeonToken,
     low: &mut [u8],
     high: &mut [u8],
     coefficient: gf8b::Elem,
 ) {
     let table = scale_table(coefficient);
-    // SAFETY: the table arrays are 16 bytes; unaligned loads are allowed.
-    let (low_table, high_table) =
-        unsafe { (vld1q_u8(table.low.as_ptr()), vld1q_u8(table.high.as_ptr())) };
-    let vector_len = low.len() / 16 * 16;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 16 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                vld1q_u8(low.as_ptr().add(offset)),
-                vld1q_u8(high.as_ptr().add(offset)),
-            )
-        };
-        // SAFETY: NEON is enabled by the enclosing target_feature.
-        let scaled = unsafe { multiply_neon(h, low_table, high_table) };
+    let low_table = vld1q_u8(&table.low);
+    let high_table = vld1q_u8(&table.high);
+    let (low_lanes, low_tail) = low.as_chunks_mut::<16>();
+    let (high_lanes, high_tail) = high.as_chunks_mut::<16>();
+    for (low_lane, high_lane) in low_lanes.iter_mut().zip(high_lanes) {
+        let l = vld1q_u8(&*low_lane);
+        let h = vld1q_u8(&*high_lane);
+        let scaled = multiply_neon(h, low_table, high_table);
         let new_low = veorq_u8(l, scaled);
         let new_high = veorq_u8(h, new_low);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            vst1q_u8(low.as_mut_ptr().add(offset), new_low);
-            vst1q_u8(high.as_mut_ptr().add(offset), new_high);
-        }
-        offset += 16;
+        vst1q_u8(low_lane, new_low);
+        vst1q_u8(high_lane, new_high);
     }
-    scalar::fused_forward::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_forward::<Gf8B>(low_tail, high_tail, coefficient);
 }
 
-#[target_feature(enable = "neon")]
-pub(super) unsafe fn gf8_fused_inverse_neon(
+/// Fused inverse butterfly over 16-byte NEON lanes, GF(2^8) coefficients.
+#[allow(clippy::used_underscore_binding)]
+#[archmage::arcane(import_intrinsics)]
+pub(super) fn gf8_fused_inverse_neon(
+    _token: archmage::NeonToken,
     low: &mut [u8],
     high: &mut [u8],
     coefficient: gf8b::Elem,
 ) {
     let table = scale_table(coefficient);
-    // SAFETY: the table arrays are 16 bytes; unaligned loads are allowed.
-    let (low_table, high_table) =
-        unsafe { (vld1q_u8(table.low.as_ptr()), vld1q_u8(table.high.as_ptr())) };
-    let vector_len = low.len() / 16 * 16;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 16 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                vld1q_u8(low.as_ptr().add(offset)),
-                vld1q_u8(high.as_ptr().add(offset)),
-            )
-        };
+    let low_table = vld1q_u8(&table.low);
+    let high_table = vld1q_u8(&table.high);
+    let (low_lanes, low_tail) = low.as_chunks_mut::<16>();
+    let (high_lanes, high_tail) = high.as_chunks_mut::<16>();
+    for (low_lane, high_lane) in low_lanes.iter_mut().zip(high_lanes) {
+        let l = vld1q_u8(&*low_lane);
+        let h = vld1q_u8(&*high_lane);
         let new_high = veorq_u8(h, l);
-        // SAFETY: NEON is enabled by the enclosing target_feature.
-        let scaled = unsafe { multiply_neon(new_high, low_table, high_table) };
+        let scaled = multiply_neon(new_high, low_table, high_table);
         let new_low = veorq_u8(l, scaled);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            vst1q_u8(low.as_mut_ptr().add(offset), new_low);
-            vst1q_u8(high.as_mut_ptr().add(offset), new_high);
-        }
-        offset += 16;
+        vst1q_u8(low_lane, new_low);
+        vst1q_u8(high_lane, new_high);
     }
-    scalar::fused_inverse::<Gf8B>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_inverse::<Gf8B>(low_tail, high_tail, coefficient);
 }
 
 // ---------------------------------------------------------------------------
 // GF(2^16) fused butterflies
 // ---------------------------------------------------------------------------
 
-#[target_feature(enable = "neon")]
-pub(super) unsafe fn gf16_fused_forward_neon(
+/// Fused forward butterfly over 16-byte NEON lanes, GF(2^16) coefficients.
+#[allow(clippy::used_underscore_binding)]
+#[archmage::arcane(import_intrinsics)]
+pub(super) fn gf16_fused_forward_neon(
+    _token: archmage::NeonToken,
     low: &mut [u8],
     high: &mut [u8],
     coefficient: gf16::Elem,
@@ -184,32 +165,25 @@ pub(super) unsafe fn gf16_fused_forward_neon(
     let (same_word, cross_word) = factor_words(coefficient);
     let same = vreinterpretq_u8_u16(vdupq_n_u16(same_word));
     let cross = vreinterpretq_u8_u16(vdupq_n_u16(cross_word));
-    let vector_len = low.len() / 16 * 16;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 16 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                vld1q_u8(low.as_ptr().add(offset)),
-                vld1q_u8(high.as_ptr().add(offset)),
-            )
-        };
-        // SAFETY: NEON is enabled by the enclosing target_feature.
-        let scaled = unsafe { scaled_vector_neon(h, same, cross) };
+    let (low_lanes, low_tail) = low.as_chunks_mut::<16>();
+    let (high_lanes, high_tail) = high.as_chunks_mut::<16>();
+    for (low_lane, high_lane) in low_lanes.iter_mut().zip(high_lanes) {
+        let l = vld1q_u8(&*low_lane);
+        let h = vld1q_u8(&*high_lane);
+        let scaled = scaled_vector_neon(h, same, cross);
         let new_low = veorq_u8(l, scaled);
         let new_high = veorq_u8(h, new_low);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            vst1q_u8(low.as_mut_ptr().add(offset), new_low);
-            vst1q_u8(high.as_mut_ptr().add(offset), new_high);
-        }
-        offset += 16;
+        vst1q_u8(low_lane, new_low);
+        vst1q_u8(high_lane, new_high);
     }
-    scalar::fused_forward::<Gf16>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_forward::<Gf16>(low_tail, high_tail, coefficient);
 }
 
-#[target_feature(enable = "neon")]
-pub(super) unsafe fn gf16_fused_inverse_neon(
+/// Fused inverse butterfly over 16-byte NEON lanes, GF(2^16) coefficients.
+#[allow(clippy::used_underscore_binding)]
+#[archmage::arcane(import_intrinsics)]
+pub(super) fn gf16_fused_inverse_neon(
+    _token: archmage::NeonToken,
     low: &mut [u8],
     high: &mut [u8],
     coefficient: gf16::Elem,
@@ -217,26 +191,16 @@ pub(super) unsafe fn gf16_fused_inverse_neon(
     let (same_word, cross_word) = factor_words(coefficient);
     let same = vreinterpretq_u8_u16(vdupq_n_u16(same_word));
     let cross = vreinterpretq_u8_u16(vdupq_n_u16(cross_word));
-    let vector_len = low.len() / 16 * 16;
-    let mut offset = 0;
-    while offset < vector_len {
-        // SAFETY: `offset + 16 <= low.len() == high.len()`; unaligned allowed.
-        let (l, h) = unsafe {
-            (
-                vld1q_u8(low.as_ptr().add(offset)),
-                vld1q_u8(high.as_ptr().add(offset)),
-            )
-        };
+    let (low_lanes, low_tail) = low.as_chunks_mut::<16>();
+    let (high_lanes, high_tail) = high.as_chunks_mut::<16>();
+    for (low_lane, high_lane) in low_lanes.iter_mut().zip(high_lanes) {
+        let l = vld1q_u8(&*low_lane);
+        let h = vld1q_u8(&*high_lane);
         let new_high = veorq_u8(h, l);
-        // SAFETY: NEON is enabled by the enclosing target_feature.
-        let scaled = unsafe { scaled_vector_neon(new_high, same, cross) };
+        let scaled = scaled_vector_neon(new_high, same, cross);
         let new_low = veorq_u8(l, scaled);
-        // SAFETY: same bounds as the loads above.
-        unsafe {
-            vst1q_u8(low.as_mut_ptr().add(offset), new_low);
-            vst1q_u8(high.as_mut_ptr().add(offset), new_high);
-        }
-        offset += 16;
+        vst1q_u8(low_lane, new_low);
+        vst1q_u8(high_lane, new_high);
     }
-    scalar::fused_inverse::<Gf16>(&mut low[vector_len..], &mut high[vector_len..], coefficient);
+    scalar::fused_inverse::<Gf16>(low_tail, high_tail, coefficient);
 }
