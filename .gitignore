@@ -4,3 +4,5 @@
 .plans/
 /.sheaf/
 /.lucid/
+/perf.data
+/perf.data.old
