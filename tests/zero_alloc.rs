@@ -10,8 +10,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use butterfly_fft::basis::{
-    conversion_scratch_elements, monomial_to_novel_bytes_scratch, monomial_to_novel_scratch,
-    novel_to_monomial_bytes_scratch, novel_to_monomial_scratch,
+    conversion_scratch_elements, interpolate_bytes_scratch, monomial_to_novel_bytes_scratch,
+    monomial_to_novel_scratch, novel_to_monomial_bytes_scratch, novel_to_monomial_scratch,
 };
 use butterfly_fft::transform::TransformPlan;
 use fgf::{Gf8B, Gf16};
@@ -123,10 +123,46 @@ fn check_ntt<F: fgf::kernel::FieldKernels>(size: usize, lanes: usize) {
     );
 }
 
+fn check_restricted<F: butterfly_fft::kernel::ButterflyKernels>(size: usize, row_len: usize) {
+    let plan = TransformPlan::<F>::new(size).expect("valid plan");
+    let active = size / 2 + 1;
+    let mut coefficients = vec![0x5au8; size * row_len];
+    coefficients[active * row_len..].fill(0);
+    let mut evaluations = coefficients.clone();
+    plan.forward_bytes(&mut evaluations, row_len).unwrap();
+    let mut rows = coefficients.clone();
+    let mut half_rows = coefficients[..size / 2 * row_len].to_vec();
+    let mut inverse_scratch =
+        vec![0u8; plan.inverse_bytes_truncated_scratch_rows(active).unwrap() * row_len];
+    let mut conversion_scratch = vec![0u8; conversion_scratch_elements(size) * row_len];
+    let selected = [0, size / 2, size - 1];
+
+    let allocations = count_allocations(|| {
+        plan.forward_bytes_selected(&mut rows, row_len, &selected)
+            .unwrap();
+        rows.copy_from_slice(&coefficients);
+        plan.forward_bytes_range(&mut rows, row_len, 1..size - 1)
+            .unwrap();
+        rows.copy_from_slice(&coefficients);
+        plan.forward_bytes_truncated_range(&mut rows, row_len, active, 1..size)
+            .unwrap();
+        plan.forward_bytes_high_coset_range(&mut half_rows, row_len, 0..size / 2)
+            .unwrap();
+        rows.copy_from_slice(&evaluations);
+        plan.inverse_bytes_truncated_scratch(&mut rows, row_len, active, &mut inverse_scratch)
+            .unwrap();
+        rows.copy_from_slice(&evaluations);
+        interpolate_bytes_scratch(&mut rows, row_len, &plan, &mut conversion_scratch).unwrap();
+    });
+    assert_eq!(allocations, 0, "{} restricted execution allocated", F::NAME);
+}
+
 /// One test per binary: the global arming flag is not thread-safe against a
 /// second concurrently running test, so every check runs here in order.
 #[test]
 fn execution_allocates_nothing() {
+    check_restricted::<Gf16>(8, 6);
+    check_restricted::<Gf8B>(8, 33);
     // Under miri the magnitudes shrink — the contract is the allocation
     // count, not the transform size, and every row-geometry class
     // (multi-element rows, partial-element tails, huge single rows) stays

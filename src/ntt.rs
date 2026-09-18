@@ -51,7 +51,6 @@
 //! the encoded bytes return unchanged whenever the input lanes were
 //! canonical.
 
-use ::alloc::boxed::Box;
 use ::alloc::vec::Vec;
 
 use fgf::field::{Elem, Field};
@@ -62,12 +61,12 @@ pub use crate::error::NttError;
 
 use crate::transform::MAX_LOG_SIZE;
 
-/// Row length in bytes below which butterfly stages over fields with vector
-/// elementwise kernels run in the batched region form; at and above it they
-/// run the packed op-call form, whose broadcast multiply reads no twiddle
-/// stream and wins on wide rows. A pure function of the row geometry and
-/// the resolved backend, set by the interleaved campaign behind the
-/// butterfly-schedule record in `BENCHMARKS.md`.
+pub(crate) mod fourstep;
+
+/// Row-length boundary between batched and packed execution for fields with
+/// vector elementwise kernels. Shorter rows use lane-tiled twiddles; wider
+/// rows use the packed operation's broadcast multiply. Public execution
+/// measurements are recorded under "Multiplicative NTT" in `BENCHMARKS.md`.
 const BATCHED_ROW_MAX: usize = 128;
 
 /// Region bytes — lane-tiled twiddles and their product with the high
@@ -75,32 +74,15 @@ const BATCHED_ROW_MAX: usize = 128;
 /// single row is a batch on its own.
 const BATCH_BYTES: usize = 64 * 1024;
 
-/// Logarithm of the smallest transform the four-step tuning schedule
-/// decomposes; smaller plans carry no decomposition and the four-step entry
-/// runs the production schedule over them. A pure placeholder until the
-/// campaign behind the four-step record in `BENCHMARKS.md` measures the
-/// crossover against the one-buffer schedules.
-const FOURSTEP_MIN_LOG: usize = 10;
-
 /// Reusable row temporary for [`NttPlan::forward_bytes_scratch`] and
 /// [`NttPlan::inverse_bytes_scratch`].
 ///
-/// Holds one row, the two region buffers the batched tuning schedule
-/// batches into — lane-tiled twiddles and their product with the high
-/// rows, reused by the four-step tuning schedule for its lane-tiled
-/// twiddle products — the transpose visited flags the four-step schedule
-/// walks its cycles with, and records the element width and row capacity
-/// it was built for. Each region buffer covers the widest batch any
-/// execution over this plan at a row length up to the built one can run,
-/// and never exceeds `max(BATCH_BYTES, row_len)` bytes; the flag buffer
-/// carries one bit per transform point of the building plan. Reuse over
-/// the same field at any row length up to the built capacity is accepted;
-/// a different element width or a longer row is rejected by the execution
-/// methods, the batched schedule additionally rejects batch regions
-/// smaller than the executing plan fills, and the four-step schedule
-/// additionally rejects transpose flags smaller than the executing plan
-/// fills. Not generic: the recorded element width is what ties it to a
-/// field.
+/// Holds one row and two batch-region buffers: lane-tiled twiddles and
+/// their product with the high rows. Each region covers the widest batch
+/// for this plan at any row length up to the built capacity and never
+/// exceeds `max(BATCH_BYTES, row_len)` bytes. Execution rejects a different
+/// element width, a longer row, or insufficient batch storage. Experimental
+/// transpose workspace belongs to the separate four-step scratch type.
 #[derive(Clone, Debug)]
 pub struct NttScratch {
     /// One row of butterfly temporaries, `row_len` bytes.
@@ -110,10 +92,6 @@ pub struct NttScratch {
     batch_temp: Vec<u8>,
     /// Lane-tiled twiddles over one batch of the batched schedule.
     batch_twiddles: Vec<u8>,
-    /// Visited flags for the four-step schedule's in-place transposes, one
-    /// bit per transform point of the building plan; every transpose
-    /// clears the range it walks before following any cycle.
-    transpose_bits: Vec<u8>,
     /// Element width of the field this scratch was built for.
     element_bytes: usize,
     /// Row length this scratch was built for, in bytes.
@@ -124,9 +102,8 @@ pub struct NttScratch {
 ///
 /// Construction resolves the root of unity, the bit-reversal permutation,
 /// every stage's twiddle powers in both directions, and the `n^-1` inverse
-/// butterflies: no allocation, no coefficient preparation. Plans at or
-/// above the four-step activation size also carry the sub-plans of the
-/// cache-blocked decomposition.
+/// scale. Execution performs butterflies without allocation or coefficient
+/// preparation. Experimental decompositions are prepared separately.
 ///
 /// See the [module documentation][self] for the transform convention and
 /// the fields that admit a domain.
@@ -148,27 +125,6 @@ pub struct NttPlan<F: FieldKernels> {
     inverse_twiddles: Vec<Coeff<F>>,
     /// Prepared `size^-1`, applied by the inverse transform.
     inverse_scale: Coeff<F>,
-    /// Cache-blocked decomposition of this plan, carried only at or above
-    /// the four-step activation size.
-    fourstep: Option<Box<FourStepSchedule<F>>>,
-}
-
-/// One plan's cache-blocked decomposition: the transform factored over a
-/// `second.size()`-by-`first.size()` slot matrix, with the twiddle pass
-/// between the two phases and a transpose before, between, and after them.
-///
-/// The sub-plan roots are the powers of the parent root the decomposition
-/// needs — `root^(first.size())` and `root^(second.size())` — because
-/// construction derives every root from the same generator exponent, so
-/// the phases compose to the parent transform exactly. Sub-plans never
-/// decompose: the schedule stays one level deep, and each phase is a
-/// plain butterfly walk.
-#[derive(Clone, Debug)]
-struct FourStepSchedule<F: FieldKernels> {
-    /// Transform for the phase along the short axis of the slot matrix.
-    first: Box<NttPlan<F>>,
-    /// Transform for the phase along the long axis.
-    second: Box<NttPlan<F>>,
 }
 
 /// Embed the integer `value` into `F` by double-and-add of `ONE`.
@@ -196,6 +152,119 @@ fn reserve<T>(target: &mut Vec<T>, additional: usize) -> Result<(), NttError> {
         .map_err(|_| NttError::AllocationFailed)
 }
 
+fn domain<F: FieldKernels>(size: usize) -> Result<(usize, F::Elem), NttError> {
+    if size == 0 || !size.is_power_of_two() {
+        return Err(NttError::InvalidSize { size });
+    }
+    let log_size = size.trailing_zeros() as usize;
+    let unsupported = NttError::UnsupportedSize {
+        size,
+        field_order: F::ORDER,
+    };
+    if log_size > MAX_LOG_SIZE {
+        return Err(unsupported);
+    }
+    let size_u64 = u64::try_from(size).map_err(|_| NttError::GeometryOverflow)?;
+    let group_order = F::ORDER - 1;
+    if group_order % u128::from(size_u64) != 0 {
+        return Err(unsupported);
+    }
+    let exponent = u64::try_from(group_order / u128::from(size_u64))
+        .map_err(|_| NttError::GeometryOverflow)?;
+    let root = F::GENERATOR.pow(exponent);
+    if root.pow(size_u64) != F::Elem::ONE {
+        return Err(unsupported);
+    }
+    if size > 1 && root.pow(size_u64 / 2) == F::Elem::ONE {
+        return Err(unsupported);
+    }
+    Ok((log_size, root))
+}
+
+impl NttScratch {
+    fn new<F: FieldKernels>(row_len: usize, batch_half: usize) -> Result<Self, NttError> {
+        if row_len == 0 || !row_len.is_multiple_of(F::BYTES) {
+            return Err(NttError::InvalidRowLength {
+                row_len,
+                element_bytes: F::BYTES,
+            });
+        }
+        // `batch_rows` is a sawtooth in `row_len`, so a scratch built for
+        // one row length must cover the widest batch every shorter row
+        // length over this plan can ask for: the whole widest half capped
+        // by one batch.
+        let widest_half = batch_half
+            .checked_mul(row_len)
+            .ok_or(NttError::GeometryOverflow)?;
+        let batch_run = widest_half.min(BATCH_BYTES.max(row_len));
+        let mut row = Vec::new();
+        reserve(&mut row, row_len)?;
+        row.resize(row_len, 0);
+        let mut batch_temp = Vec::new();
+        reserve(&mut batch_temp, batch_run)?;
+        batch_temp.resize(batch_run, 0);
+        let mut batch_twiddles = Vec::new();
+        reserve(&mut batch_twiddles, batch_run)?;
+        batch_twiddles.resize(batch_run, 0);
+        Ok(Self {
+            row,
+            batch_temp,
+            batch_twiddles,
+            element_bytes: F::BYTES,
+            row_len,
+        })
+    }
+}
+
+fn validate_scratch<F: FieldKernels>(
+    size: usize,
+    buffer_bytes: usize,
+    row_len: usize,
+    scratch: &NttScratch,
+    batch_half: usize,
+) -> Result<(), NttError> {
+    if row_len == 0 || !row_len.is_multiple_of(F::BYTES) {
+        return Err(NttError::InvalidRowLength {
+            row_len,
+            element_bytes: F::BYTES,
+        });
+    }
+    let expected = size
+        .checked_mul(row_len)
+        .ok_or(NttError::GeometryOverflow)?;
+    if buffer_bytes != expected {
+        return Err(NttError::BufferLength {
+            expected,
+            actual: buffer_bytes,
+        });
+    }
+    if scratch.element_bytes != F::BYTES {
+        return Err(NttError::ScratchFieldMismatch {
+            scratch_element_bytes: scratch.element_bytes,
+            field_element_bytes: F::BYTES,
+        });
+    }
+    if scratch.row_len < row_len {
+        return Err(NttError::ScratchRowTooSmall {
+            required: row_len,
+            available: scratch.row_len,
+        });
+    }
+    // The batched schedule's region buffers must cover this plan's
+    // widest batch: scratch reused from a smaller plan passes the row
+    // check above but cannot hold the run.
+    let needed = batch_rows(row_len, batch_half)
+        .checked_mul(row_len)
+        .ok_or(NttError::GeometryOverflow)?;
+    if scratch.batch_temp.len() < needed {
+        return Err(NttError::ScratchBatchTooSmall {
+            required: needed,
+            available: scratch.batch_temp.len(),
+        });
+    }
+    Ok(())
+}
+
 impl<F: FieldKernels> NttPlan<F> {
     /// Construct a plan for a power-of-two `size` over `F`.
     ///
@@ -210,38 +279,8 @@ impl<F: FieldKernels> NttPlan<F> {
     /// not fit; [`NttError::AllocationFailed`] if a table cannot be
     /// allocated.
     pub fn new(size: usize) -> Result<Self, NttError> {
-        Self::build(size, FOURSTEP_MIN_LOG)
-    }
-
-    /// Shared constructor; `fourstep_from` is the smallest log size that
-    /// builds a decomposition, and `usize::MAX` never builds one, which is
-    /// how the sub-plans stay shallow.
-    fn build(size: usize, fourstep_from: usize) -> Result<Self, NttError> {
-        if size == 0 || !size.is_power_of_two() {
-            return Err(NttError::InvalidSize { size });
-        }
-        let log_size = size.trailing_zeros() as usize;
-        let unsupported = NttError::UnsupportedSize {
-            size,
-            field_order: F::ORDER,
-        };
-        if log_size > MAX_LOG_SIZE {
-            return Err(unsupported);
-        }
+        let (log_size, root) = domain::<F>(size)?;
         let size_u64 = u64::try_from(size).map_err(|_| NttError::GeometryOverflow)?;
-        let group_order = F::ORDER - 1;
-        if group_order % u128::from(size_u64) != 0 {
-            return Err(unsupported);
-        }
-        let exponent = u64::try_from(group_order / u128::from(size_u64))
-            .map_err(|_| NttError::GeometryOverflow)?;
-        let root = F::GENERATOR.pow(exponent);
-        if root.pow(size_u64) != F::Elem::ONE {
-            return Err(unsupported);
-        }
-        if size > 1 && root.pow(size_u64 / 2) == F::Elem::ONE {
-            return Err(unsupported);
-        }
 
         let permutation = bit_reversal(size, log_size)?;
         let stage_offsets = stage_offsets(log_size)?;
@@ -249,16 +288,6 @@ impl<F: FieldKernels> NttPlan<F> {
         let forward_twiddles = twiddle_table::<F>(size, log_size, root, twiddle_count)?;
         let inverse_twiddles = twiddle_table::<F>(size, log_size, root.inv(), twiddle_count)?;
         let inverse_scale = Coeff::new(embed::<F>(size_u64).inv());
-        let fourstep = if log_size >= fourstep_from {
-            let short = 1usize << (log_size / 2);
-            let long = 1usize << log_size.div_ceil(2);
-            Some(Box::new(FourStepSchedule {
-                first: Box::new(Self::build(short, usize::MAX)?),
-                second: Box::new(Self::build(long, usize::MAX)?),
-            }))
-        } else {
-            None
-        };
 
         Ok(Self {
             size,
@@ -269,7 +298,6 @@ impl<F: FieldKernels> NttPlan<F> {
             forward_twiddles,
             inverse_twiddles,
             inverse_scale,
-            fourstep,
         })
     }
 
@@ -289,59 +317,19 @@ impl<F: FieldKernels> NttPlan<F> {
         self.root
     }
 
-    /// Allocate the row temporary, the batched-schedule region buffers,
-    /// and the four-step transpose flags for rows of `row_len` bytes.
+    /// Allocate the row temporary and batched-schedule region buffers for
+    /// rows of `row_len` bytes.
     ///
-    /// The result is reusable for any execution whose row length is at most
-    /// `row_len` over a field of the same element width. The region buffers
-    /// are sized for this plan's widest batch, and the transpose flags for
-    /// this plan's size, so the batched and four-step schedules reject them
-    /// when a larger plan executes.
+    /// Reusable over a field of the same element width at any row length
+    /// up to `row_len`. Execution rejects insufficient batch storage when
+    /// scratch is reused with a larger plan.
     ///
     /// # Errors
     /// [`NttError::InvalidRowLength`] if `row_len` is zero or not a whole
-    /// number of elements; [`NttError::AllocationFailed`] if any buffer
-    /// cannot be allocated.
+    /// number of elements; [`NttError::GeometryOverflow`] for an overflowing
+    /// region size; [`NttError::AllocationFailed`] if a buffer cannot be allocated.
     pub fn scratch(&self, row_len: usize) -> Result<NttScratch, NttError> {
-        if row_len == 0 || !row_len.is_multiple_of(F::BYTES) {
-            return Err(NttError::InvalidRowLength {
-                row_len,
-                element_bytes: F::BYTES,
-            });
-        }
-        // `batch_rows` is a sawtooth in `row_len`, so a scratch built for
-        // one row length must cover the widest batch every shorter row
-        // length over this plan can ask for: the whole widest half capped
-        // by one batch.
-        let widest_half = (self.size >> 1)
-            .checked_mul(row_len)
-            .ok_or(NttError::GeometryOverflow)?;
-        let batch_run = widest_half.min(BATCH_BYTES.max(row_len));
-        let mut row = Vec::new();
-        reserve(&mut row, row_len)?;
-        row.resize(row_len, 0);
-        let mut batch_temp = Vec::new();
-        reserve(&mut batch_temp, batch_run)?;
-        batch_temp.resize(batch_run, 0);
-        let mut batch_twiddles = Vec::new();
-        reserve(&mut batch_twiddles, batch_run)?;
-        batch_twiddles.resize(batch_run, 0);
-        let transpose_flags = if self.fourstep.is_some() {
-            self.size.div_ceil(8)
-        } else {
-            0
-        };
-        let mut transpose_bits = Vec::new();
-        reserve(&mut transpose_bits, transpose_flags)?;
-        transpose_bits.resize(transpose_flags, 0);
-        Ok(NttScratch {
-            row,
-            batch_temp,
-            batch_twiddles,
-            transpose_bits,
-            element_bytes: F::BYTES,
-            row_len,
-        })
+        NttScratch::new::<F>(row_len, self.size >> 1)
     }
 
     /// Forward transform, in place, over `size` rows of `row_len` bytes.
@@ -354,8 +342,9 @@ impl<F: FieldKernels> NttPlan<F> {
     /// [`NttError::InvalidRowLength`] for a zero or partial-element row
     /// length; [`NttError::BufferLength`] for a wrong buffer length;
     /// [`NttError::ScratchFieldMismatch`] when the scratch was built for a
-    /// different element width; [`NttError::ScratchTooSmall`] when its row
-    /// capacity is below `row_len`; [`NttError::GeometryOverflow`] when
+    /// different element width; [`NttError::ScratchRowTooSmall`] when its row
+    /// capacity is below `row_len`; [`NttError::ScratchBatchTooSmall`] when
+    /// batch storage is insufficient; [`NttError::GeometryOverflow`] when
     /// the total length does not fit [`usize`].
     pub fn forward_bytes_scratch(
         &self,
@@ -396,47 +385,7 @@ impl<F: FieldKernels> NttPlan<F> {
         row_len: usize,
         scratch: &NttScratch,
     ) -> Result<(), NttError> {
-        if row_len == 0 || !row_len.is_multiple_of(F::BYTES) {
-            return Err(NttError::InvalidRowLength {
-                row_len,
-                element_bytes: F::BYTES,
-            });
-        }
-        let expected = self
-            .size
-            .checked_mul(row_len)
-            .ok_or(NttError::GeometryOverflow)?;
-        if buffer_bytes != expected {
-            return Err(NttError::BufferLength {
-                expected,
-                actual: buffer_bytes,
-            });
-        }
-        if scratch.element_bytes != F::BYTES {
-            return Err(NttError::ScratchFieldMismatch {
-                scratch_element_bytes: scratch.element_bytes,
-                field_element_bytes: F::BYTES,
-            });
-        }
-        if scratch.row_len < row_len {
-            return Err(NttError::ScratchTooSmall {
-                required: row_len,
-                available: scratch.row_len,
-            });
-        }
-        // The batched schedule's region buffers must cover this plan's
-        // widest batch: scratch reused from a smaller plan passes the row
-        // check above but cannot hold the run.
-        let needed = batch_rows(row_len, self.size >> 1)
-            .checked_mul(row_len)
-            .ok_or(NttError::GeometryOverflow)?;
-        if scratch.batch_temp.len() < needed {
-            return Err(NttError::ScratchTooSmall {
-                required: needed,
-                available: scratch.batch_temp.len(),
-            });
-        }
-        Ok(())
+        validate_scratch::<F>(self.size, buffer_bytes, row_len, scratch, self.size >> 1)
     }
 
     /// Bit-reversal permutation followed by `log_size` butterfly stages
@@ -522,8 +471,7 @@ impl<F: FieldKernels> NttPlan<F> {
 
     /// The packed op-call butterfly form: one whole-row prepared multiply
     /// into scratch, one row copy, and packed add and subtract per pair.
-    /// Kept as the tuning control the fused schedule is measured against;
-    /// see the "NTT fused butterflies" record in `BENCHMARKS.md`.
+    /// Also exposed as a tuning control through the internals facade.
     fn butterflies_packed(
         &self,
         rows: &mut [u8],
@@ -676,7 +624,7 @@ impl<F: FieldKernels> NttPlan<F> {
         self.validate(rows.len(), row_len, scratch)?;
         let needed = batch_rows(row_len, self.size >> 1) * row_len;
         if scratch.batch_temp.len() < needed {
-            return Err(NttError::ScratchTooSmall {
+            return Err(NttError::ScratchBatchTooSmall {
                 required: needed,
                 available: scratch.batch_temp.len(),
             });
@@ -685,158 +633,6 @@ impl<F: FieldKernels> NttPlan<F> {
         self.permute(rows, row_len);
         self.butterflies_batched(rows, row_len, &self.forward_twiddles, scratch);
         Ok(())
-    }
-
-    /// Tuning-only forward transform through the cache-blocked four-step
-    /// decomposition. Same contract as
-    /// [`NttPlan::forward_bytes_scratch`], except the scratch must carry
-    /// transpose flags this plan's size fills — any scratch this plan
-    /// builds does; reachable through the `internals` facade only. Below
-    /// the activation size the entry runs the production schedule.
-    pub(crate) fn forward_fourstep(
-        &self,
-        rows: &mut [u8],
-        row_len: usize,
-        scratch: &mut NttScratch,
-    ) -> Result<(), NttError> {
-        self.validate(rows.len(), row_len, scratch)?;
-        let Some(schedule) = &self.fourstep else {
-            canonicalize::<F>(rows);
-            self.butterflies(rows, row_len, &self.forward_twiddles, scratch);
-            return Ok(());
-        };
-        let short = schedule.first.size();
-        let long = schedule.second.size();
-        let flags = self.size.div_ceil(8);
-        let needed = batch_rows(row_len, short)
-            .checked_mul(row_len)
-            .ok_or(NttError::GeometryOverflow)?;
-        if scratch.batch_temp.len() < needed {
-            return Err(NttError::ScratchTooSmall {
-                required: needed,
-                available: scratch.batch_temp.len(),
-            });
-        }
-        if scratch.transpose_bits.len() < flags {
-            return Err(NttError::ScratchTooSmall {
-                required: flags,
-                available: scratch.transpose_bits.len(),
-            });
-        }
-        canonicalize::<F>(rows);
-        {
-            let NttScratch {
-                row,
-                transpose_bits,
-                ..
-            } = scratch;
-            transpose_slots(
-                rows,
-                row_len,
-                short,
-                long,
-                &mut transpose_bits[..flags],
-                &mut row[..row_len],
-            );
-        }
-        for group in rows.chunks_exact_mut(short * row_len) {
-            schedule
-                .first
-                .butterflies(group, row_len, &schedule.first.forward_twiddles, scratch);
-        }
-        self.fourstep_twiddles(rows, row_len, long, short, scratch);
-        {
-            let NttScratch {
-                row,
-                transpose_bits,
-                ..
-            } = scratch;
-            transpose_slots(
-                rows,
-                row_len,
-                long,
-                short,
-                &mut transpose_bits[..flags],
-                &mut row[..row_len],
-            );
-        }
-        for group in rows.chunks_exact_mut(long * row_len) {
-            schedule
-                .second
-                .butterflies(group, row_len, &schedule.second.forward_twiddles, scratch);
-        }
-        {
-            let NttScratch {
-                row,
-                transpose_bits,
-                ..
-            } = scratch;
-            transpose_slots(
-                rows,
-                row_len,
-                short,
-                long,
-                &mut transpose_bits[..flags],
-                &mut row[..row_len],
-            );
-        }
-        Ok(())
-    }
-
-    /// The four-step twiddle pass: every entry of the `long`-by-`short`
-    /// slot matrix is scaled by `root^(row·column)`, so the two phases
-    /// compose into the parent transform. Row zero is skipped because its
-    /// factor is one; every other row's factors are powers of
-    /// `root^row`, so one running product per row walks the whole matrix
-    /// with one multiplication per entry. Wide rows tile their factors
-    /// across the batch regions and multiply with the elementwise kernel,
-    /// like the batched schedule; narrow rows multiply slot by slot with a
-    /// prepared coefficient. Geometry and scratch capacity are established
-    /// by [`NttPlan::forward_fourstep`].
-    // `as_chunks_mut::<F::BYTES>()` would need a const generic argument
-    // depending on `F`, which stable Rust does not accept.
-    #[allow(clippy::chunks_exact_to_as_chunks)]
-    fn fourstep_twiddles(
-        &self,
-        rows: &mut [u8],
-        row_len: usize,
-        long: usize,
-        short: usize,
-        scratch: &mut NttScratch,
-    ) {
-        let run_rows = batch_rows(row_len, short);
-        let run_bytes = run_rows * row_len;
-        let mut row_factor = self.root;
-        for row in 1..long {
-            let group = &mut rows[row * short * row_len..(row + 1) * short * row_len];
-            if run_bytes < batched_region_min_bytes::<F>() {
-                let mut power = F::Elem::ONE;
-                for slot in group.chunks_exact_mut(row_len) {
-                    ops::mul_assign_with::<F>(slot, &Coeff::<F>::new(power));
-                    power = power.mul(row_factor);
-                }
-            } else {
-                let NttScratch {
-                    batch_temp,
-                    batch_twiddles,
-                    ..
-                } = scratch;
-                let temp = &mut batch_temp[..run_bytes];
-                let expanded = &mut batch_twiddles[..run_bytes];
-                let mut power = F::Elem::ONE;
-                for run in group.chunks_exact_mut(run_bytes) {
-                    for tw_row in expanded.chunks_exact_mut(row_len) {
-                        for slot in tw_row.chunks_exact_mut(F::BYTES) {
-                            F::encode(slot, power);
-                        }
-                        power = power.mul(row_factor);
-                    }
-                    ops::mul_elementwise::<F>(temp, expanded, run);
-                    run.copy_from_slice(temp);
-                }
-            }
-            row_factor = row_factor.mul(self.root);
-        }
     }
 }
 
@@ -912,55 +708,6 @@ fn batched_region_min_bytes<F: FieldKernels>() -> usize {
     F::vector_elementwise_min_bytes().max(F::BYTES * 2)
 }
 
-/// In-place transpose of a `height`-by-`width` matrix of `row_len`-byte
-/// slots: slot `width·row + column` moves to `height·column + row`, whole
-/// slots at a time. Each cycle of the permutation is followed through a
-/// one-slot temporary, with `bits` carrying one visited flag per slot and
-/// cleared on entry; fixed points — the diagonal of a square matrix,
-/// isolated entries of a rectangular one — are skipped untouched.
-/// Geometry is established by [`NttPlan::forward_fourstep`].
-fn transpose_slots(
-    rows: &mut [u8],
-    row_len: usize,
-    height: usize,
-    width: usize,
-    bits: &mut [u8],
-    temp: &mut [u8],
-) {
-    bits.fill(0);
-    for start in 0..height * width {
-        // Cycles already walked by an earlier start are done: re-walking
-        // applies the transpose to already-placed slots and undoes them.
-        if bits[start >> 3] & (1 << (start & 7)) != 0 {
-            continue;
-        }
-        // The walk pulls each slot from the next position along the cycle,
-        // so it follows the inverse of the transpose mapping: slot
-        // `width·row + column` still lands at `height·column + row`.
-        if start % height * width + start / height == start {
-            continue;
-        }
-        temp.copy_from_slice(&rows[start * row_len..(start + 1) * row_len]);
-        let mut current = start;
-        loop {
-            bits[current >> 3] |= 1 << (current & 7);
-            let next = current % height * width + current / height;
-            if next == start {
-                rows[current * row_len..(current + 1) * row_len].copy_from_slice(temp);
-                break;
-            }
-            if next < current {
-                let (head, tail) = rows.split_at_mut(current * row_len);
-                tail[..row_len].copy_from_slice(&head[next * row_len..(next + 1) * row_len]);
-            } else {
-                let (head, tail) = rows.split_at_mut(next * row_len);
-                head[current * row_len..(current + 1) * row_len].copy_from_slice(&tail[..row_len]);
-            }
-            current = next;
-        }
-    }
-}
-
 /// Flat per-stage powers of `root`, prepared for the host backend.
 ///
 /// Stage `s` (transform length `2^(s+1)`) stores `w^0 … w^(2^s - 1)` for
@@ -988,16 +735,10 @@ fn twiddle_table<F: FieldKernels>(
 
 #[cfg(test)]
 mod tests {
-    //! The two butterfly schedules are algebraically identical, so
-    //! byte-for-byte agreement at straddling geometries is the contract for
-    //! the comparison that can run everywhere. The Goldilocks packed
-    //! schedule rides released fgf's packed kernels, which the
-    //! "Known correctness finding" in `BENCHMARKS.md` documents as computing
-    //! incorrect values nondeterministically once a Goldilocks buffer
-    //! reaches 256 elements on GFNI hosts, so wide Goldilocks geometries
-    //! check the fused schedule against an independent direct DFT instead
-    //! of against the suspect control. `QuadMersenne31` has no packed
-    //! kernels and compares at every geometry.
+    //! Butterfly schedules and explicit four-step preparation must agree
+    //! byte for byte at straddling geometries. The fused forward transform
+    //! is also checked against an independent direct DFT, so agreement is
+    //! not the only check of the transform's natural-order convention.
     use super::*;
     use alloc::vec;
     use fgf::{Gf16, Goldilocks, QuadMersenne31};
@@ -1248,7 +989,7 @@ mod tests {
         assert_eq!(
             plan.forward_batched(&mut rows, 8, &mut scratch)
                 .unwrap_err(),
-            NttError::ScratchTooSmall {
+            NttError::ScratchBatchTooSmall {
                 required: 4096,
                 available: 256
             }
@@ -1270,10 +1011,13 @@ mod tests {
         rng.bytes(&mut fused);
         let mut fourstep = fused.clone();
         let mut scratch = plan.scratch(row_len).expect("scratch");
+        let prepared = fourstep::FourStepPlan::<F>::new(size).expect("supported size");
+        let mut fourstep_scratch = prepared.scratch(row_len).expect("fourstep scratch");
 
         plan.forward_fused(&mut fused, row_len, &mut scratch)
             .expect("geometry");
-        plan.forward_fourstep(&mut fourstep, row_len, &mut scratch)
+        prepared
+            .forward_bytes_scratch(&mut fourstep, row_len, &mut fourstep_scratch)
             .expect("geometry");
         assert_eq!(
             fused,
@@ -1285,8 +1029,7 @@ mod tests {
 
     #[test]
     fn goldilocks_fourstep_agrees_with_fused() {
-        let threshold = 1usize << FOURSTEP_MIN_LOG;
-        for &size in agreement_sizes().iter().filter(|&&size| size >= threshold) {
+        for &size in agreement_sizes() {
             for &lanes in lane_widths() {
                 let plan = NttPlan::<Goldilocks>::new(size).expect("supported size");
                 check_fourstep_agrees_with_fused::<Goldilocks>(
@@ -1301,8 +1044,7 @@ mod tests {
 
     #[test]
     fn quad_mersenne31_fourstep_agrees_with_fused() {
-        let threshold = 1usize << FOURSTEP_MIN_LOG;
-        for &size in agreement_sizes().iter().filter(|&&size| size >= threshold) {
+        for &size in agreement_sizes() {
             for &lanes in lane_widths() {
                 let plan = NttPlan::<QuadMersenne31>::new(size).expect("supported size");
                 check_fourstep_agrees_with_fused::<QuadMersenne31>(
@@ -1317,22 +1059,20 @@ mod tests {
 
     /// Odd log sizes exercise the rectangular transpose: size eight
     /// factors as the long-by-short pair four-by-two, size sixteen as the
-    /// square four-by-four, size thirty-two as eight-by-four. These sit
-    /// below the activation size, so they enter through the shared
-    /// constructor with a lowered threshold, reaching the same machinery
-    /// the production plans carry.
+    /// square four-by-four, size thirty-two as eight-by-four. Explicit
+    /// preparation exercises the decomposition even at these small sizes.
     #[test]
     fn fourstep_non_square_decomposition_agrees_with_fused() {
         for &size in &[8usize, 16, 32] {
             for &lanes in lane_widths() {
-                let plan = NttPlan::<Goldilocks>::build(size, 3).expect("supported size");
+                let plan = NttPlan::<Goldilocks>::new(size).expect("supported size");
                 check_fourstep_agrees_with_fused::<Goldilocks>(
                     &plan,
                     size,
                     lanes,
                     0x7ea5_1f2e ^ (size as u64) << 32 ^ lanes as u64,
                 );
-                let plan = NttPlan::<QuadMersenne31>::build(size, 3).expect("supported size");
+                let plan = NttPlan::<QuadMersenne31>::new(size).expect("supported size");
                 check_fourstep_agrees_with_fused::<QuadMersenne31>(
                     &plan,
                     size,
@@ -1342,8 +1082,8 @@ mod tests {
             }
         }
         if !cfg!(miri) {
-            // A production-size rectangular decomposition, eight-by-four
-            // in slots, with wide rows.
+            // A large rectangular decomposition, 128-by-64 in slots,
+            // with wide rows.
             let plan = NttPlan::<Goldilocks>::new(8192).expect("supported size");
             check_fourstep_agrees_with_fused::<Goldilocks>(&plan, 8192, 16, 0x8bad_5eed);
             let plan = NttPlan::<QuadMersenne31>::new(8192).expect("supported size");
@@ -1351,11 +1091,11 @@ mod tests {
         }
     }
 
-    /// Below the activation size the four-step entry runs the production
-    /// schedule, byte-identical to the fused tuning entry.
+    /// Small explicit decompositions match the fused tuning entry without
+    /// substituting a production fallback.
     #[test]
-    fn fourstep_below_threshold_passes_through() {
-        for &size in &[8usize, 64] {
+    fn fourstep_small_decompositions_agree() {
+        for &size in &[1usize, 2, 8, 64] {
             for &lanes in lane_widths() {
                 let plan = NttPlan::<Goldilocks>::new(size).expect("supported size");
                 check_fourstep_agrees_with_fused::<Goldilocks>(
@@ -1380,21 +1120,79 @@ mod tests {
     /// rejection of the batched entry.
     #[test]
     fn fourstep_rejects_scratch_from_a_smaller_plan() {
-        let small = NttPlan::<Goldilocks>::new(64).expect("supported size");
+        let small = fourstep::FourStepPlan::<Goldilocks>::new(64).expect("supported size");
         let mut scratch = small.scratch(8).expect("scratch");
-        let plan = NttPlan::<Goldilocks>::new(1024).expect("supported size");
-        let mut rows = vec![0xa5u8; 1024 * 8];
+        let plan = fourstep::FourStepPlan::<Goldilocks>::new(128).expect("supported size");
+        let mut rows = vec![0xa5u8; 128 * 8];
         let pristine = rows.clone();
-        // The shared batch-region check fires first: the batched schedule
-        // is the widest region any execution of this plan allocates.
+        // Both plans use the same short-axis batch capacity; only the
+        // transpose flag capacity differs.
         assert_eq!(
-            plan.forward_fourstep(&mut rows, 8, &mut scratch)
+            plan.forward_bytes_scratch(&mut rows, 8, &mut scratch)
                 .unwrap_err(),
-            NttError::ScratchTooSmall {
-                required: 4096,
-                available: 256
+            NttError::ScratchTransposeTooSmall {
+                required: 16,
+                available: 8
             }
         );
         assert_eq!(rows, pristine, "fourstep rejection mutated the rows");
+    }
+
+    #[test]
+    fn fourstep_rejects_insufficient_batch_capacity() {
+        let small = fourstep::FourStepPlan::<Goldilocks>::new(64).unwrap();
+        let mut scratch = small.scratch(8).unwrap();
+        let plan = fourstep::FourStepPlan::<Goldilocks>::new(1024).unwrap();
+        let mut rows = vec![0xa5u8; 1024 * 8];
+        let pristine = rows.clone();
+        assert_eq!(
+            plan.forward_bytes_scratch(&mut rows, 8, &mut scratch)
+                .unwrap_err(),
+            NttError::ScratchBatchTooSmall {
+                required: 256,
+                available: 64
+            }
+        );
+        assert_eq!(rows, pristine);
+    }
+
+    #[test]
+    fn fourstep_reuses_wider_workspace_and_rejects_wrong_rows() {
+        let plan = fourstep::FourStepPlan::<Goldilocks>::new(32).unwrap();
+        let control = NttPlan::<Goldilocks>::new(32).unwrap();
+        let mut scratch = plan.scratch(24).unwrap();
+        let mut control_scratch = control.scratch(24).unwrap();
+        for row_len in [24, 8, 16, 24] {
+            let mut rows = vec![0xa5u8; 32 * row_len];
+            let mut expected = rows.clone();
+            control
+                .forward_bytes_scratch(&mut expected, row_len, &mut control_scratch)
+                .unwrap();
+            plan.forward_bytes_scratch(&mut rows, row_len, &mut scratch)
+                .unwrap();
+            assert_eq!(rows, expected);
+        }
+        let mut rows = vec![0xa5u8; 32 * 32];
+        let pristine = rows.clone();
+        assert_eq!(
+            plan.forward_bytes_scratch(&mut rows, 32, &mut scratch)
+                .unwrap_err(),
+            NttError::ScratchRowTooSmall {
+                required: 32,
+                available: 24
+            }
+        );
+        assert_eq!(rows, pristine);
+        let binary = fourstep::FourStepPlan::<Gf16>::new(1).unwrap();
+        let mut wrong_field = binary.scratch(32).unwrap();
+        assert_eq!(
+            plan.forward_bytes_scratch(&mut rows, 32, &mut wrong_field)
+                .unwrap_err(),
+            NttError::ScratchFieldMismatch {
+                scratch_element_bytes: 2,
+                field_element_bytes: 8
+            }
+        );
+        assert_eq!(rows, pristine);
     }
 }

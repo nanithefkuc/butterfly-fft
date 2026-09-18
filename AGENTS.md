@@ -5,9 +5,9 @@ built, tested, and extended.
 
 ## What this crate is
 
-`butterfly-fft` is the shared additive-FFT transform layer for binary fields. It
-owns subspace and affine-coset transform mathematics, transform-buffer layouts,
-factor tables, basis conversion, and fused butterfly kernels.
+`butterfly-fft` provides additive FFTs over binary fields and multiplicative
+NTTs over supported finite fields. It owns transform mathematics,
+transform-buffer layouts, factor tables, basis conversion, and fused butterflies.
 
 It is not a codec and does not own wire formats, receipt bookkeeping, or
 mapping between evaluation points and wire indexes. Field arithmetic and
@@ -22,9 +22,12 @@ Rust imports use the package's library identifier, `butterfly_fft`.
    an independent behavioral check. Never use the implementation under test as
    its own oracle. Formal derivatives are checked through monomial-basis
    differentiation, not only by restating a novel-basis formula.
-2. **Checked public geometry.** Byte-row APIs reject `row_len == 0` and partial
-   elements before entering a walker. Every derived byte length, offset, row
-   start, and scratch size uses checked arithmetic before slicing.
+2. **Checked public geometry.** Additive execution returns `TransformError`
+   for invalid buffers, workspace, selections, ranges, active prefixes, and
+   byte-row geometry before modifying any destination or scratch. NTT methods
+   return `NttError`. Every derived byte length and offset is checked before
+   slicing. All public error enums are non-exhaustive and implement
+   `core::error::Error`, including without `std`.
 3. **Explicit output contracts.** Restricted selected, range, and truncated
    walkers document which rows are final outputs. Other rows may contain
    undefined intermediate values and must not be consumed.
@@ -35,9 +38,10 @@ Rust imports use the package's library identifier, `butterfly_fft`.
 5. **Coset plans share validation.** `TransformPlan::with_shift` runs the
    same size and basis validation as the subspace constructors, so
    equivalent invalid inputs return equivalent errors.
-6. **Stable API boundaries.** Factor tables and tuning data remain behind the
-   `internals` feature. Do not widen the stable API to expose implementation
-   details.
+6. **Stable API boundaries.** Factor tables and tuning APIs are reachable only
+   through the re-export-only `internals` facade. The underlying code compiles
+   unconditionally. Experimental four-step state belongs to `FourStepPlan` and
+   `FourStepScratch`, not stable `NttPlan` or `NttScratch` preparation.
 7. **Kernel ownership.** Every intrinsic belongs under `src/kernel`. The
    per-tier kernel entries live on the crate-private `TierButterflies`
    trait, sealed by the private `Sealed` supertrait bound, and take the
@@ -54,7 +58,7 @@ Rust imports use the package's library identifier, `butterfly_fft`.
 9. **Feature discipline.** The crate is `no_std` plus `alloc` without default
    features. New code must not reach for `std` outside `#[cfg(feature = "std")]`.
 10. **Documentation.** Public items stay documented and
-    `cargo doc --all-features` remains warning-free.
+    `just doc` remains warning-free.
 
 
 ## Unsafe residue ledger
@@ -77,23 +81,29 @@ stack-wide downgrade-only `SIMD_BACKEND` override. `kernel::BUTTERFLY_FFT_TIERS`
 contains the tiers implemented by this crate. Do not add a crate-local CPU
 probe or environment override.
 
+The user-approved exception to the ecosystem's git-until-1.0 dependency rule
+is `simdispatch = { version = "=0.1.0", default-features = false }` from the
+registry. It must resolve the same package as `fgf` so both crates share one
+`Backend` type. This exact source/version exception does not authorize other
+pre-1.0 registry dependencies or local implementations of lower-layer algebra.
+
 ## Tooling
 
 `just validate` is the pull-request gate; the shared recipe surface is
 documented once in the umbrella's root `AGENTS.md`. Crate specifics:
 
 - The `internals` facade is the crate's single `feature = "internals"` site.
-  The facade-only items in `src/tuning.rs`, `TransformPlan::table`, and the
-  `FactorTable` accessors carry per-item `#[allow(dead_code)]`: they are
-  alive whenever the facade is compiled and unreachable otherwise, which is
-  the visibility-only exception the mechanism permits.
-- Test target `factor_table` requires `internals`; it exercises the facade
-  surface against the public derivative as oracle.
-
-- **`TIERS = v3_gfni_crypto v3 v2 scalar`**, matching the tiers
-  `kernel::BUTTERFLY_FFT_TIERS` declares. Dispatch resolves one backend
-  per process, so `just test-tiers` and `just cover` re-run the suite once per
-  tier; a single host run only ever exercises the strongest.
+  Its implementation items compile without that feature; narrowly scoped
+  `#[allow(dead_code)]` attributes cover items otherwise unreachable.
+- Test target `factor_table` requires `internals` and compares tuning entries
+  with their public counterparts.
+- **`TIERS` follows the host architecture:** `v3_gfni_crypto v3 v2 scalar` on
+  x86, `neon_aes neon scalar` on AArch64, and `scalar` elsewhere.
+  `just test-tiers` and `just cover` start a process per requested tier.
+  Unsupported upgrades fall back; a requested tier is not execution evidence.
+  The harness-free `backend_report` test prints the requested override, resolved
+  additive backend, and per-field additive and NTT backends. Inspect that report
+  when deciding which paths the host actually exercised.
 - **`MIRI = --no-default-features`.** The `no_std` + `alloc` closure is what
   miri can execute, and the run covers the safe wrappers over `src/kernel`
   — walker geometry, scratch sizing, and the checked byte-row
@@ -102,20 +112,16 @@ documented once in the umbrella's root `AGENTS.md`. Crate specifics:
   helpers and the geometry lists in `tests/zero_alloc.rs`): miri validates
   geometry and safety, not throughput, and every boundary class —
   multi-element rows, partial-element tails, awkward truncations — stays
-  represented at the smaller sizes. The full run sits near twenty-six
-  minutes; growing it past that needs a reason.
-- **`COV_IGNORE` excludes `kernel/x86/gfni.rs`**: only GFNI-capable hosts
-  execute a line of it, and the hosted CI fleet mixes Xeon generations, so
-  counting the file made the gate depend on which runner the job landed
-  on. The direct-kernel differential tests cover it wherever the host can
-  summon the tier; elsewhere they skip with a printed notice.
+  represented at the smaller sizes.
+- **`COV_IGNORE` is empty.** GFNI source is not excluded from coverage.
+  Direct-kernel differential tests run when the host can summon the required
+  token; unsupported hosts skip those kernels. A passing run does not imply
+  that every backend was exercised.
 - **Bench target:** `ntt` — `just bench-save ntt`, then `just bench ntt`.
-  The `ntt_tuning` target (requires `internals`) drives the fused,
-  batched, packed, and four-step NTT butterfly schedules past production
-  selection for crossover measurement, validating every arm against the
-  fused arm and an exact round trip before timing; its record is the
-  "Butterfly schedules" section of `BENCHMARKS.md`, which also carries the
-  four-step rejection and its revisit bar.
+  The `ntt_tuning` target (requires `internals`) compares fused, batched,
+  packed, and explicitly prepared four-step execution outside production
+  selection. Keep internal schedule measurements in ignored local storage.
+  `BENCHMARKS.md` contains public API and competitor measurements only.
 - `justfile` is a byte-identical vendored copy; never edit it here or the
   umbrella's `just drift` check fails. Crate-specific values and recipes belong
   in `crate.just`.
@@ -127,12 +133,11 @@ exact field values and use an independent oracle. Run focused regressions first,
 then the full matrix:
 
 ```sh
-cargo test --all-features
-cargo test --no-default-features
-SIMD_BACKEND=scalar cargo test --all-features
-cargo fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+just test <regression-filter>
+just features
+just test-tiers
+just lint
+just doc
 ```
 
 The excluded `benchmarks/afft` project is separate from the published package.

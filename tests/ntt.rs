@@ -372,7 +372,7 @@ fn validation_errors_leave_the_destination_untouched() {
     assert_eq!(
         plan.forward_bytes_scratch(&mut rows, row_len, &mut narrow)
             .unwrap_err(),
-        NttError::ScratchTooSmall {
+        NttError::ScratchRowTooSmall {
             required: row_len,
             available: element,
         }
@@ -382,7 +382,7 @@ fn validation_errors_leave_the_destination_untouched() {
     assert_eq!(
         plan.inverse_bytes_scratch(&mut rows, row_len, &mut narrow)
             .unwrap_err(),
-        NttError::ScratchTooSmall {
+        NttError::ScratchRowTooSmall {
             required: row_len,
             available: element,
         }

@@ -254,13 +254,21 @@ pin DEP REV:
     grep -E "^{{DEP}} = " Cargo.toml
     cargo update -p {{DEP}}
 
+# A parent-directory `.cargo/config.toml` patch table makes every Cargo
+# invocation rewrite `Cargo.lock`, and `cargo publish` performs that rewrite
+# and then refuses the dirty tree it just created. Restore the committed
+# lock and resolve from outside any such scope, so the upload is what the
+# registry resolves from the shipped manifest.
 [group('release')]
 publish-dry:
-    cargo publish --dry-run
+    git checkout HEAD -- Cargo.lock 2>/dev/null || true
+    cd / && cargo publish --dry-run --manifest-path "{{invocation_directory()}}/Cargo.toml"
 
 [group('release')]
-publish: validate
-    cargo publish
+publish:
+    just validate
+    git checkout HEAD -- Cargo.lock 2>/dev/null || true
+    cd / && cargo publish --manifest-path "{{invocation_directory()}}/Cargo.toml"
 
 # ── Environment ───────────────────────────────────────────────────────────────
 

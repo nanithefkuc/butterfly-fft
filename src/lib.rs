@@ -26,6 +26,6 @@ pub mod transform;
 #[cfg(feature = "internals")]
 pub mod internals;
 
-pub use error::{NttError, PlanError, TransformLengthError};
+pub use error::{NttError, PlanError, TransformError};
 pub use ntt::NttPlan;
 pub use transform::TransformPlan;

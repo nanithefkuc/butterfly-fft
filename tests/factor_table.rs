@@ -1,15 +1,14 @@
 //! The `internals` surface: factor-table inspection and the tuning-only
 //! derivative schedules, checked against the public derivative as oracle.
 
-use butterfly_fft::internals::{self, FactorTable};
+use butterfly_fft::internals::{self, FactorTable, FourStepPlan, FourStepScratch};
 use butterfly_fft::ntt::{NttPlan, NttScratch};
 use butterfly_fft::transform::TransformPlan;
 use fgf::{Gf8B, Gf16, QuadMersenne31};
 
-use butterfly_fft::error::TransformLengthError;
+use butterfly_fft::error::TransformError;
 
-type Schedule<F> =
-    fn(&TransformPlan<F>, &mut [u8], usize, &[u8]) -> Result<(), TransformLengthError>;
+type Schedule<F> = fn(&mut [u8], usize, &TransformPlan<F>, &[u8]) -> Result<(), TransformError>;
 
 /// Deterministic per-test element stream, as in the crate's other suites.
 struct Rng(u64);
@@ -54,7 +53,7 @@ fn tuning_derivative_schedules_match_production() {
         for schedule in schedules {
             // A garbage preset catches missing initialization.
             let mut actual = vec![0xA5u8; coefficients.len()];
-            schedule(&plan, &mut actual, row_len, &coefficients).unwrap();
+            schedule(&mut actual, row_len, &plan, &coefficients).unwrap();
             assert_eq!(
                 actual, expected,
                 "schedule diverged at size {size} row length {row_len}"
@@ -75,7 +74,7 @@ fn tuning_schedules_reject_bad_geometry() {
         internals::derivative_into_bytes_overwrite::<Gf8B>,
     ];
     for schedule in schedules {
-        assert!(schedule(&plan, &mut derivative, 1, &coefficients).is_err());
+        assert!(schedule(&mut derivative, 1, &plan, &coefficients).is_err());
     }
 }
 
@@ -96,16 +95,27 @@ fn tuning_ntt_schedules_match_production() {
         for schedule in [
             internals::ntt_forward_fused::<QuadMersenne31>,
             internals::ntt_forward_packed::<QuadMersenne31>,
+            internals::ntt_forward_batched::<QuadMersenne31>,
         ] {
             // A garbage preset catches missing initialization.
             let mut actual = vec![0xA5u8; rows.len()];
             actual.copy_from_slice(&rows);
-            schedule(&plan, &mut actual, row_len, &mut scratch).unwrap();
+            schedule(&mut actual, row_len, &plan, &mut scratch).unwrap();
             assert_eq!(
                 actual, expected,
                 "schedule diverged at size {size} lanes {lanes}"
             );
         }
+        let prepared = FourStepPlan::<QuadMersenne31>::new(size).unwrap();
+        let mut fourstep_scratch: FourStepScratch = prepared.scratch(row_len).unwrap();
+        let mut actual = rows.clone();
+        prepared
+            .forward_bytes_scratch(&mut actual, row_len, &mut fourstep_scratch)
+            .unwrap();
+        assert_eq!(
+            actual, expected,
+            "fourstep disagreed at size {size} lanes {lanes}"
+        );
     }
 }
 
@@ -119,7 +129,17 @@ fn tuning_ntt_schedules_reject_bad_geometry() {
     for schedule in [
         internals::ntt_forward_fused::<QuadMersenne31>,
         internals::ntt_forward_packed::<QuadMersenne31>,
+        internals::ntt_forward_batched::<QuadMersenne31>,
     ] {
-        assert!(schedule(&plan, &mut rows, 8, &mut scratch).is_err());
+        assert!(schedule(&mut rows, 8, &plan, &mut scratch).is_err());
     }
+    let prepared = FourStepPlan::<QuadMersenne31>::new(16).unwrap();
+    let mut fourstep_scratch = prepared.scratch(8).unwrap();
+    let pristine = rows.clone();
+    assert!(
+        prepared
+            .forward_bytes_scratch(&mut rows, 8, &mut fourstep_scratch)
+            .is_err()
+    );
+    assert_eq!(rows, pristine);
 }

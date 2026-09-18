@@ -1,10 +1,11 @@
 //! Tuning-only execution controls for benchmark crossovers.
 //!
 //! Each function bypasses production crossover selection to drive one exact
-//! derivative schedule directly. Reachable only through the `internals`
+//! schedule directly. Execution arguments are destination, row geometry,
+//! plan, then sources or scratch. Reachable only through the `internals`
 //! facade; nothing here is a compatibility promise.
 
-use crate::error::{NttError, TransformLengthError};
+use crate::error::{NttError, TransformError};
 use crate::kernel::ButterflyKernels;
 use crate::ntt::{NttPlan, NttScratch};
 use crate::transform::TransformPlan;
@@ -36,11 +37,11 @@ pub fn plan_table<F: ButterflyKernels>(
 // Reachable only through the `internals` facade.
 #[allow(dead_code)]
 pub fn derivative_into_bytes_sweep<F: ButterflyKernels>(
-    plan: &TransformPlan<F>,
     derivative: &mut [u8],
     row_len: usize,
+    plan: &TransformPlan<F>,
     coefficients: &[u8],
-) -> Result<(), TransformLengthError> {
+) -> Result<(), TransformError> {
     plan.derivative_into_bytes_sweep(derivative, row_len, coefficients)
 }
 
@@ -58,11 +59,11 @@ pub fn derivative_into_bytes_sweep<F: ButterflyKernels>(
 // Reachable only through the `internals` facade.
 #[allow(dead_code)]
 pub fn derivative_into_bytes_gather<F: ButterflyKernels>(
-    plan: &TransformPlan<F>,
     derivative: &mut [u8],
     row_len: usize,
+    plan: &TransformPlan<F>,
     coefficients: &[u8],
-) -> Result<(), TransformLengthError> {
+) -> Result<(), TransformError> {
     plan.derivative_into_bytes_gather(derivative, row_len, coefficients)
 }
 
@@ -80,11 +81,11 @@ pub fn derivative_into_bytes_gather<F: ButterflyKernels>(
 // Reachable only through the `internals` facade.
 #[allow(dead_code)]
 pub fn derivative_into_bytes_overwrite<F: ButterflyKernels>(
-    plan: &TransformPlan<F>,
     derivative: &mut [u8],
     row_len: usize,
+    plan: &TransformPlan<F>,
     coefficients: &[u8],
-) -> Result<(), TransformLengthError> {
+) -> Result<(), TransformError> {
     plan.derivative_into_bytes_overwrite(derivative, row_len, coefficients)
 }
 
@@ -99,9 +100,9 @@ pub fn derivative_into_bytes_overwrite<F: ButterflyKernels>(
 // Reachable only through the `internals` facade.
 #[allow(dead_code)]
 pub fn ntt_forward_fused<F: FieldKernels>(
-    plan: &NttPlan<F>,
     rows: &mut [u8],
     row_len: usize,
+    plan: &NttPlan<F>,
     scratch: &mut NttScratch,
 ) -> Result<(), NttError> {
     plan.forward_fused(rows, row_len, scratch)
@@ -118,9 +119,9 @@ pub fn ntt_forward_fused<F: FieldKernels>(
 // Reachable only through the `internals` facade.
 #[allow(dead_code)]
 pub fn ntt_forward_packed<F: FieldKernels>(
-    plan: &NttPlan<F>,
     rows: &mut [u8],
     row_len: usize,
+    plan: &NttPlan<F>,
     scratch: &mut NttScratch,
 ) -> Result<(), NttError> {
     plan.forward_packed(rows, row_len, scratch)
@@ -139,33 +140,10 @@ pub fn ntt_forward_packed<F: FieldKernels>(
 // Reachable only through the `internals` facade.
 #[allow(dead_code)]
 pub fn ntt_forward_batched<F: FieldKernels>(
-    plan: &NttPlan<F>,
     rows: &mut [u8],
     row_len: usize,
+    plan: &NttPlan<F>,
     scratch: &mut NttScratch,
 ) -> Result<(), NttError> {
     plan.forward_batched(rows, row_len, scratch)
-}
-
-/// Tuning-only forward NTT forced through the cache-blocked four-step
-/// decomposition.
-///
-/// This exposes the alternative execution schedule for benchmark crossover
-/// measurements. It has the same output and geometry contract as
-/// [`NttPlan::forward_bytes_scratch`] and allocates nothing, except that
-/// the scratch must carry transpose flags the plan's size fills — any
-/// scratch this plan builds does; below the activation size the entry
-/// runs the production schedule.
-///
-/// # Errors
-/// As [`NttPlan::forward_bytes_scratch`].
-// Reachable only through the `internals` facade.
-#[allow(dead_code)]
-pub fn ntt_forward_fourstep<F: FieldKernels>(
-    plan: &NttPlan<F>,
-    rows: &mut [u8],
-    row_len: usize,
-    scratch: &mut NttScratch,
-) -> Result<(), NttError> {
-    plan.forward_fourstep(rows, row_len, scratch)
 }

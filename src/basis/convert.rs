@@ -1,6 +1,6 @@
 //! Monomial ↔ novel coefficient-basis conversion.
 //!
-//! The novel basis is `X_i(x) = ∏_j W̄_j(x)^{bit_j(i)}` with
+//! The novel basis is `X_i(x) = ∏_j W̄_j(x)^{bit_j(i)}`. Direct
 //! term-rewriting is `O(n²)`; the recursion below is `O(n log² n)` and
 //! reads the transform's own split as polynomial algebra:
 //!
@@ -12,12 +12,15 @@
 //! halves over dimension `k-1`. Novel → monomial multiplies by the sparse
 //! linearized `W̄_{k-1}` (`k` nonzero terms) on the way up; monomial → novel
 //! divides by it on the way down. Both are `O(n·k)` per level.
+//!
+//! Invalid buffer lengths, scratch lengths, or byte-row geometry return
+//! [`TransformError`] before any coefficients or scratch are mutated.
 
 use ::alloc::vec;
 
 use fgf::field::Elem;
 
-use crate::error::TransformLengthError;
+use crate::error::TransformError;
 use crate::kernel::ButterflyKernels;
 use crate::transform::TransformPlan;
 
@@ -35,12 +38,12 @@ pub const fn conversion_scratch_elements(size: usize) -> usize {
 /// polynomial. Allocates one scratch buffer of `size / 2` elements.
 ///
 /// # Errors
-/// Returns [`TransformLengthError`] unless `coefficients.len() ==
+/// Returns [`TransformError`] unless `coefficients.len() ==
 /// plan.size()`.
 pub fn novel_to_monomial<F: ButterflyKernels>(
     coefficients: &mut [F::Elem],
     plan: &TransformPlan<F>,
-) -> Result<(), TransformLengthError> {
+) -> Result<(), TransformError> {
     check_len(coefficients.len(), plan.size())?;
     if plan.log_size() == 0 {
         return Ok(());
@@ -57,13 +60,13 @@ pub fn novel_to_monomial<F: ButterflyKernels>(
 /// coefficient entries are final outputs on return.
 ///
 /// # Errors
-/// Returns [`TransformLengthError`] unless `coefficients.len() ==
+/// Returns [`TransformError`] unless `coefficients.len() ==
 /// plan.size()` and `scratch` is large enough.
 pub fn novel_to_monomial_scratch<F: ButterflyKernels>(
     coefficients: &mut [F::Elem],
     plan: &TransformPlan<F>,
     scratch: &mut [F::Elem],
-) -> Result<(), TransformLengthError> {
+) -> Result<(), TransformError> {
     check_len(coefficients.len(), plan.size())?;
     let required = conversion_scratch_elements(plan.size());
     check_min_len(scratch.len(), required)?;
@@ -82,12 +85,12 @@ pub fn novel_to_monomial_scratch<F: ButterflyKernels>(
 /// inverse of [`novel_to_monomial`].
 ///
 /// # Errors
-/// Returns [`TransformLengthError`] unless `coefficients.len() ==
+/// Returns [`TransformError`] unless `coefficients.len() ==
 /// plan.size()`.
 pub fn monomial_to_novel<F: ButterflyKernels>(
     coefficients: &mut [F::Elem],
     plan: &TransformPlan<F>,
-) -> Result<(), TransformLengthError> {
+) -> Result<(), TransformError> {
     check_len(coefficients.len(), plan.size())?;
     if plan.log_size() == 0 {
         return Ok(());
@@ -104,13 +107,13 @@ pub fn monomial_to_novel<F: ButterflyKernels>(
 /// coefficient entries are final outputs on return.
 ///
 /// # Errors
-/// Returns [`TransformLengthError`] unless `coefficients.len() ==
+/// Returns [`TransformError`] unless `coefficients.len() ==
 /// plan.size()` and `scratch` is large enough.
 pub fn monomial_to_novel_scratch<F: ButterflyKernels>(
     coefficients: &mut [F::Elem],
     plan: &TransformPlan<F>,
     scratch: &mut [F::Elem],
-) -> Result<(), TransformLengthError> {
+) -> Result<(), TransformError> {
     check_len(coefficients.len(), plan.size())?;
     let required = conversion_scratch_elements(plan.size());
     check_min_len(scratch.len(), required)?;
@@ -134,18 +137,16 @@ pub fn monomial_to_novel_scratch<F: ButterflyKernels>(
 /// least `plan.size() / 2` rows of `row_len` bytes.
 ///
 /// # Errors
-/// Returns [`TransformLengthError`] (lengths in bytes) unless `coefficients`
-/// holds exactly `plan.size()` rows and `scratch` is large enough.
-///
-/// # Panics
-/// Panics if `row_len` is zero, holds a partial trailing element, or a
-/// complete byte length is not representable by [`usize`].
+/// Returns [`TransformError`] (lengths in bytes) unless `coefficients`
+/// holds exactly `plan.size()` rows and `scratch` is large enough. Also
+/// rejects zero or partial-element row lengths and total byte lengths not
+/// representable by [`usize`]. Errors leave both buffers unchanged.
 pub fn novel_to_monomial_bytes_scratch<F: ButterflyKernels>(
     coefficients: &mut [u8],
     row_len: usize,
     plan: &TransformPlan<F>,
     scratch: &mut [u8],
-) -> Result<(), TransformLengthError> {
+) -> Result<(), TransformError> {
     let required = check_byte_geometry::<F>(coefficients.len(), row_len, plan.size())?;
     check_min_len(scratch.len(), required)?;
     if plan.log_size() != 0 {
@@ -169,18 +170,13 @@ pub fn novel_to_monomial_bytes_scratch<F: ButterflyKernels>(
 /// least `plan.size() / 2` rows of `row_len` bytes.
 ///
 /// # Errors
-/// Returns [`TransformLengthError`] (lengths in bytes) unless `coefficients`
-/// holds exactly `plan.size()` rows and `scratch` is large enough.
-///
-/// # Panics
-/// Panics if `row_len` is zero, holds a partial trailing element, or a
-/// complete byte length is not representable by [`usize`].
+/// As [`novel_to_monomial_bytes_scratch`]. Errors leave both buffers unchanged.
 pub fn monomial_to_novel_bytes_scratch<F: ButterflyKernels>(
     coefficients: &mut [u8],
     row_len: usize,
     plan: &TransformPlan<F>,
     scratch: &mut [u8],
-) -> Result<(), TransformLengthError> {
+) -> Result<(), TransformError> {
     let required = check_byte_geometry::<F>(coefficients.len(), row_len, plan.size())?;
     check_min_len(scratch.len(), required)?;
     if plan.log_size() != 0 {
@@ -209,16 +205,14 @@ pub fn monomial_to_novel_bytes_scratch<F: ButterflyKernels>(
 ///
 /// # Errors
 /// As [`TransformPlan::inverse_bytes`] and
-/// [`novel_to_monomial_bytes_scratch`].
-///
-/// # Panics
-/// As those functions.
+/// [`novel_to_monomial_bytes_scratch`]. Both geometries are validated before
+/// interpolation begins; errors leave `rows` and `scratch` unchanged.
 pub fn interpolate_bytes_scratch<F: ButterflyKernels>(
     rows: &mut [u8],
     row_len: usize,
     plan: &TransformPlan<F>,
     scratch: &mut [u8],
-) -> Result<(), TransformLengthError> {
+) -> Result<(), TransformError> {
     // Both geometries are validated before the first row is touched, so a
     // rejected call leaves the input unchanged.
     let required = check_byte_geometry::<F>(rows.len(), row_len, plan.size())?;
@@ -227,19 +221,22 @@ pub fn interpolate_bytes_scratch<F: ButterflyKernels>(
     novel_to_monomial_bytes_scratch(rows, row_len, plan, scratch)
 }
 
-fn check_len(got: usize, expected: usize) -> Result<(), TransformLengthError> {
+fn check_len(got: usize, expected: usize) -> Result<(), TransformError> {
     if got == expected {
         Ok(())
     } else {
-        Err(TransformLengthError { expected, got })
+        Err(TransformError::BufferLength { expected, got })
     }
 }
 
-fn check_min_len(got: usize, expected: usize) -> Result<(), TransformLengthError> {
+fn check_min_len(got: usize, expected: usize) -> Result<(), TransformError> {
     if got >= expected {
         Ok(())
     } else {
-        Err(TransformLengthError { expected, got })
+        Err(TransformError::ScratchTooSmall {
+            required: expected,
+            available: got,
+        })
     }
 }
 
@@ -247,15 +244,19 @@ fn check_byte_geometry<F: ButterflyKernels>(
     got: usize,
     row_len: usize,
     size: usize,
-) -> Result<usize, TransformLengthError> {
-    assert_ne!(row_len, 0, "row length must be nonzero");
-    assert_eq!(row_len % F::BYTES, 0, "partial trailing element");
+) -> Result<usize, TransformError> {
+    if row_len == 0 || !row_len.is_multiple_of(F::BYTES) {
+        return Err(TransformError::InvalidRowLength {
+            row_len,
+            element_bytes: F::BYTES,
+        });
+    }
     let expected = size
         .checked_mul(row_len)
-        .expect("coefficient byte length overflow");
+        .ok_or(TransformError::GeometryOverflow)?;
     let required = conversion_scratch_elements(size)
         .checked_mul(row_len)
-        .expect("scratch byte length overflow");
+        .ok_or(TransformError::GeometryOverflow)?;
     check_len(got, expected)?;
     Ok(required)
 }
@@ -707,7 +708,7 @@ mod tests {
     fn wrong_lengths_are_rejected() {
         let plan = TransformPlan::<Gf16>::new(8).unwrap();
         let mut short_values = vec![<Gf16 as Field>::Elem::ZERO; 7];
-        let coefficient_error = TransformLengthError {
+        let coefficient_error = TransformError::BufferLength {
             expected: 8,
             got: 7,
         };
@@ -722,9 +723,9 @@ mod tests {
 
         let mut values = vec![<Gf16 as Field>::Elem::ZERO; 8];
         let mut short_scratch = vec![<Gf16 as Field>::Elem::ZERO; 3];
-        let scratch_error = TransformLengthError {
-            expected: 4,
-            got: 3,
+        let scratch_error = TransformError::ScratchTooSmall {
+            required: 4,
+            available: 3,
         };
         assert_eq!(
             novel_to_monomial_scratch(&mut values, &plan, &mut short_scratch).unwrap_err(),
@@ -737,7 +738,7 @@ mod tests {
 
         let mut short_rows = vec![0u8; 15];
         let mut byte_scratch = vec![0u8; 8];
-        let byte_coefficient_error = TransformLengthError {
+        let byte_coefficient_error = TransformError::BufferLength {
             expected: 16,
             got: 15,
         };
@@ -754,9 +755,9 @@ mod tests {
 
         let mut rows = vec![0u8; 16];
         let mut short_byte_scratch = vec![0u8; 7];
-        let byte_scratch_error = TransformLengthError {
-            expected: 8,
-            got: 7,
+        let byte_scratch_error = TransformError::ScratchTooSmall {
+            required: 8,
+            available: 7,
         };
         assert_eq!(
             novel_to_monomial_bytes_scratch(&mut rows, 2, &plan, &mut short_byte_scratch)
@@ -780,33 +781,47 @@ mod tests {
         let original = rows;
         assert_eq!(
             interpolate_bytes_scratch(&mut rows, 1, &plan, &mut []).unwrap_err(),
-            TransformLengthError {
-                expected: 2,
-                got: 0,
+            TransformError::ScratchTooSmall {
+                required: 2,
+                available: 0,
             }
         );
         assert_eq!(rows, original);
     }
 
     #[test]
-    #[should_panic(expected = "row length must be nonzero")]
-    fn zero_row_length_panics_before_execution() {
+    fn invalid_byte_geometry_leaves_buffers_unchanged() {
         let plan = TransformPlan::<Gf16>::new(8).unwrap();
-        novel_to_monomial_bytes_scratch(&mut [], 0, &plan, &mut []).unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "partial trailing element")]
-    fn partial_element_row_panics_before_execution() {
-        let plan = TransformPlan::<Gf16>::new(8).unwrap();
-        monomial_to_novel_bytes_scratch(&mut [], 3, &plan, &mut []).unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "coefficient byte length overflow")]
-    fn overflowing_byte_geometry_panics_before_execution() {
-        let plan = TransformPlan::<Gf16>::new(8).unwrap();
-        novel_to_monomial_bytes_scratch(&mut [], usize::MAX - 1, &plan, &mut []).unwrap();
+        let mut rows = [0x5au8; 16];
+        let mut scratch = [0xa5u8; 8];
+        for (row_len, error) in [
+            (
+                0,
+                TransformError::InvalidRowLength {
+                    row_len: 0,
+                    element_bytes: 2,
+                },
+            ),
+            (
+                3,
+                TransformError::InvalidRowLength {
+                    row_len: 3,
+                    element_bytes: 2,
+                },
+            ),
+            (usize::MAX - 1, TransformError::GeometryOverflow),
+        ] {
+            assert_eq!(
+                novel_to_monomial_bytes_scratch(&mut rows, row_len, &plan, &mut scratch),
+                Err(error)
+            );
+            assert_eq!(
+                monomial_to_novel_bytes_scratch(&mut rows, row_len, &plan, &mut scratch),
+                Err(error)
+            );
+            assert_eq!(rows, [0x5a; 16]);
+            assert_eq!(scratch, [0xa5; 8]);
+        }
     }
 
     #[test]

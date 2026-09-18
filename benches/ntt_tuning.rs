@@ -13,7 +13,7 @@
 use std::hint::black_box;
 
 use butterfly_fft::internals::{
-    ntt_forward_batched, ntt_forward_fourstep, ntt_forward_fused, ntt_forward_packed,
+    FourStepPlan, FourStepScratch, ntt_forward_batched, ntt_forward_fused, ntt_forward_packed,
 };
 use butterfly_fft::ntt::{NttPlan, NttScratch};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
@@ -25,9 +25,6 @@ use fgf::{Goldilocks, QuadMersenne31};
 const SIZES: [usize; 6] = [64, 256, 1024, 4096, 16384, 65536];
 /// Independent transform lanes packed into one row.
 const LANES: [usize; 5] = [1, 2, 4, 8, 16];
-/// Smallest size the four-step arm benches, mirroring the crate's
-/// activation threshold for the decomposition.
-const FOURSTEP_MIN_SIZE: usize = 1024;
 
 /// Fixed-seed LCG, reduced into the field by the canonicalizing read.
 fn fill<F: Field>(bytes: &mut [u8], seed: u64) {
@@ -44,9 +41,12 @@ fn fill<F: Field>(bytes: &mut [u8], seed: u64) {
 fn schedules<F: FieldKernels>(criterion: &mut Criterion) {
     for size in SIZES {
         let plan = NttPlan::<F>::new(size).expect("plan");
+        let fourstep_plan = FourStepPlan::<F>::new(size).expect("fourstep plan");
         for lanes in LANES {
             let row_len = lanes * F::BYTES;
             let mut scratch: NttScratch = plan.scratch(row_len).expect("scratch");
+            let mut fourstep_scratch: FourStepScratch =
+                fourstep_plan.scratch(row_len).expect("fourstep scratch");
 
             let mut fused = vec![0u8; size * row_len];
             fill::<F>(&mut fused, 0x1234_5678_9abc_def1);
@@ -57,9 +57,9 @@ fn schedules<F: FieldKernels>(criterion: &mut Criterion) {
             // everywhere. Both alternative arms must also match the
             // fused arm byte for byte.
             let mut packed_probe = fused.clone();
-            ntt_forward_packed(&plan, &mut packed_probe, row_len, &mut scratch).expect("geometry");
+            ntt_forward_packed(&mut packed_probe, row_len, &plan, &mut scratch).expect("geometry");
             let mut fused_probe = fused.clone();
-            ntt_forward_fused(&plan, &mut fused_probe, row_len, &mut scratch).expect("geometry");
+            ntt_forward_fused(&mut fused_probe, row_len, &plan, &mut scratch).expect("geometry");
             assert_eq!(
                 packed_probe,
                 fused_probe,
@@ -67,7 +67,7 @@ fn schedules<F: FieldKernels>(criterion: &mut Criterion) {
                 F::NAME
             );
             let mut batched_probe = fused.clone();
-            ntt_forward_batched(&plan, &mut batched_probe, row_len, &mut scratch)
+            ntt_forward_batched(&mut batched_probe, row_len, &plan, &mut scratch)
                 .expect("geometry");
             assert_eq!(
                 batched_probe,
@@ -76,7 +76,8 @@ fn schedules<F: FieldKernels>(criterion: &mut Criterion) {
                 F::NAME
             );
             let mut fourstep_probe = fused.clone();
-            ntt_forward_fourstep(&plan, &mut fourstep_probe, row_len, &mut scratch)
+            fourstep_plan
+                .forward_bytes_scratch(&mut fourstep_probe, row_len, &mut fourstep_scratch)
                 .expect("geometry");
             assert_eq!(
                 fourstep_probe,
@@ -94,9 +95,9 @@ fn schedules<F: FieldKernels>(criterion: &mut Criterion) {
                 F::NAME
             );
             let mut packed = fused.clone();
-            ntt_forward_packed(&plan, &mut packed, row_len, &mut scratch).expect("geometry");
+            ntt_forward_packed(&mut packed, row_len, &plan, &mut scratch).expect("geometry");
             let mut batched = fused.clone();
-            ntt_forward_batched(&plan, &mut batched, row_len, &mut scratch).expect("geometry");
+            ntt_forward_batched(&mut batched, row_len, &plan, &mut scratch).expect("geometry");
 
             let case = format!("p{size}_l{lanes}");
             let mut group = criterion.benchmark_group(format!("ntt_tuning/{}", F::NAME));
@@ -105,9 +106,9 @@ fn schedules<F: FieldKernels>(criterion: &mut Criterion) {
             group.bench_function(format!("fused/{case}"), |bencher| {
                 bencher.iter(|| {
                     ntt_forward_fused(
-                        &plan,
                         black_box(&mut fused),
                         row_len,
+                        &plan,
                         black_box(&mut scratch),
                     )
                     .expect("validated geometry");
@@ -116,9 +117,9 @@ fn schedules<F: FieldKernels>(criterion: &mut Criterion) {
             group.bench_function(format!("packed/{case}"), |bencher| {
                 bencher.iter(|| {
                     ntt_forward_packed(
-                        &plan,
                         black_box(&mut packed),
                         row_len,
+                        &plan,
                         black_box(&mut scratch),
                     )
                     .expect("validated geometry");
@@ -127,28 +128,26 @@ fn schedules<F: FieldKernels>(criterion: &mut Criterion) {
             group.bench_function(format!("batched/{case}"), |bencher| {
                 bencher.iter(|| {
                     ntt_forward_batched(
-                        &plan,
                         black_box(&mut batched),
                         row_len,
+                        &plan,
                         black_box(&mut scratch),
                     )
                     .expect("validated geometry");
                 });
             });
-            if size >= FOURSTEP_MIN_SIZE {
-                let mut fourstep = fused.clone();
-                group.bench_function(format!("fourstep/{case}"), |bencher| {
-                    bencher.iter(|| {
-                        ntt_forward_fourstep(
-                            &plan,
+            let mut fourstep = fused.clone();
+            group.bench_function(format!("fourstep/{case}"), |bencher| {
+                bencher.iter(|| {
+                    fourstep_plan
+                        .forward_bytes_scratch(
                             black_box(&mut fourstep),
                             row_len,
-                            black_box(&mut scratch),
+                            black_box(&mut fourstep_scratch),
                         )
                         .expect("validated geometry");
-                    });
                 });
-            }
+            });
             group.finish();
         }
     }

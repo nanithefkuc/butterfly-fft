@@ -243,30 +243,6 @@ pub(crate) fn subspace_points<F: Field>(dimension: usize) -> Vec<F::Elem> {
         .collect()
 }
 
-/// Whether `elements` are GF(2)-linearly independent as bit vectors.
-///
-/// XOR-basis elimination: each pivot carries a distinct highest set bit;
-/// `min(v, v ^ pivot)` clears that bit from `v` exactly when it was set.
-pub(crate) fn linearly_independent<F: Field>(elements: &[F::Elem]) -> bool {
-    let mut pivots: Vec<u128> = Vec::with_capacity(elements.len());
-    for &element in elements {
-        let mut bytes = [0u8; 16];
-        F::encode(&mut bytes[..F::BYTES], element);
-        let mut vector = u128::from_le_bytes(bytes);
-        for &pivot in &pivots {
-            vector = vector.min(vector ^ pivot);
-        }
-        if vector == 0 {
-            return false;
-        }
-        for pivot in &mut pivots {
-            *pivot = (*pivot).min(*pivot ^ vector);
-        }
-        pivots.push(vector);
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,20 +298,6 @@ mod tests {
                 let element = bit_basis_element::<F>(index);
                 assert_eq!(element, element_from_index::<F>(1 << index));
             }
-        }
-        check::<Gf8B>();
-        check::<Gf16>();
-    }
-
-    #[test]
-    fn independence_detection() {
-        fn check<F: Field>() {
-            assert!(linearly_independent::<F>(&bit_basis::<F>(F::BITS as usize)));
-            assert!(!linearly_independent::<F>(&[F::Elem::ZERO]));
-            // β_0, β_1, β_0^β_1 is dependent.
-            let mut dependent = bit_basis::<F>(2);
-            dependent.push(dependent[0].add(dependent[1]));
-            assert!(!linearly_independent::<F>(&dependent));
         }
         check::<Gf8B>();
         check::<Gf16>();

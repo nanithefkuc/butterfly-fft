@@ -1,6 +1,6 @@
 [package]
 name = "butterfly-fft"
-version = "0.1.1"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.93"
 description = "Additive FFT and NTT transform plans over finite fields"
@@ -9,7 +9,7 @@ license = "MIT"
 readme = "README.md"
 keywords = ["galois", "finite-field", "fft", "ntt", "simd"]
 categories = ["algorithms", "mathematics", "no-std"]
-exclude = ["/.github", "/.plans", "/benchmarks"]
+exclude = ["/.github", "/.plans", "/.lucid", "/.sheaf", "/benchmarks"]
 
 [features]
 default = ["std", "simd"]
@@ -32,11 +32,11 @@ simdispatch = { version = "=0.1.0", default-features = false }
 # Capability tokens for the butterfly kernels, owned by `simd` (the feature
 # that compiles the kernels naming them), at the exact release `fgf` resolves
 # so both crates compile one `archmage`.
-archmage = { version = "0.9.29", optional = true }
+archmage = { version = "=0.9.29", optional = true }
 fgf = { version = "=1.1.0", default-features = false }
 
 [dev-dependencies]
-criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]
 name = "ntt"
@@ -46,6 +46,10 @@ harness = false
 name = "ntt_tuning"
 harness = false
 required-features = ["internals"]
+
+[[test]]
+name = "backend_report"
+harness = false
 
 
 [[test]]

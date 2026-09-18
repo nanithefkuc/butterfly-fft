@@ -74,8 +74,8 @@ jobs:
         env:
           SIMD_BACKEND: v3_gfni_crypto
       - run: cargo llvm-cov --no-report --no-default-features
-      - run: cargo llvm-cov report --summary-only --ignore-filename-regex 'kernel/x86/gfni\.rs$'
-      - run: cargo llvm-cov report --fail-under-lines 95 --ignore-filename-regex 'kernel/x86/gfni\.rs$' --lcov --output-path coverage.lcov
+      - run: cargo llvm-cov report --summary-only
+      - run: cargo llvm-cov report --fail-under-lines 95 --lcov --output-path coverage.lcov
       - uses: actions/upload-artifact@v4
         if: always()
         with:

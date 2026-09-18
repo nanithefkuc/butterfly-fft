@@ -1,10 +1,11 @@
 //! Additive-FFT plans and in-place execution models.
 //!
 //! A [`TransformPlan`] evaluates polynomials over a power-of-two additive
-//! domain of a binary field and interpolates them back. Both directions
-//! consume and produce coefficients in the novel basis
+//! domain of a binary field and interpolates them back. Forward execution
+//! maps novel-basis coefficients to evaluations; inverse execution recovers
+//! those coefficients. The novel basis is
 //! `X_i(x) = ∏_j W̄_j(x)^{bit_j(i)}`; [`crate::basis`] converts between
-//! that and the monomial basis. Evaluation points are enumerated in basis
+//! it and the monomial basis. Evaluation points are enumerated in basis
 //! order: point `i` is the coset shift plus the XOR of the basis elements
 //! at the set bits of `i` ([`TransformPlan::point_element`]). Under the
 //! default bit basis, point `i` is the field element whose little-endian
@@ -16,12 +17,13 @@
 //! operate on `size` rows of `row_len` bytes: one row per transform point,
 //! each row a vector of packed little-endian field elements whose lanes
 //! undergo the same transform independently. Plans own their twiddle and
-//! derivative tables; every execution model runs in place and allocates
-//! nothing. Byte-row geometry — nonzero row length, whole elements,
-//! representable total length — is validated before the first row is
-//! touched. Restricted selected, range, and truncated models define only
-//! their documented output rows; the remaining rows hold undefined
-//! intermediate values.
+//! derivative tables; execution borrows caller-owned buffers and allocates
+//! nothing. Invalid buffer or scratch lengths, byte-row geometry, selections,
+//! ranges, and active prefixes return [`TransformError`] before any destination
+//! or scratch is mutated. Byte rows must be nonempty, contain whole elements,
+//! and have a total length representable by [`usize`]. Restricted selected,
+//! range, and truncated models define only their documented output rows;
+//! the remaining rows hold undefined intermediate values.
 //!
 //! ```
 //! use butterfly_fft::TransformPlan;
@@ -48,7 +50,7 @@ use fgf::ops::{self, Coeff};
 
 use crate::kernel::{Backend, ButterflyKernels, backend_for};
 
-pub use crate::error::{PlanError, TransformLengthError};
+pub use crate::error::{PlanError, TransformError};
 
 pub(crate) mod factors;
 mod walk;
@@ -66,14 +68,14 @@ use walk::{
 /// the field's own extension degree caps smaller fields further.
 pub const MAX_LOG_SIZE: usize = 20;
 
-/// Row-length floor past which the overwrite-first derivative schedule wins
-/// on the scalar and GFNI backends; the measurement lives in
-/// `BENCHMARKS.md` under "Derivative schedules".
+/// Row-length floor for selecting the overwrite-first derivative schedule.
+/// Public derivative measurements are recorded in `BENCHMARKS.md` under
+/// "GF(2^16) derivative family"; internal schedule timings are not published there.
 const DERIVATIVE_OVERWRITE_ROW_MIN: usize = 1 << 10;
 
-/// Row-length floor past which GFNI's register-blocked gather beats
-/// overwrite-first; the measurement lives in `BENCHMARKS.md` under
-/// "Derivative schedules".
+/// Row-length floor for selecting GFNI's register-blocked gather schedule.
+/// Public derivative measurements are recorded in `BENCHMARKS.md` under
+/// "GF(2^16) derivative family"; internal schedule timings are not published there.
 const DERIVATIVE_GATHER_ROW_MIN: usize = 1 << 16;
 
 /// Reusable additive-FFT plan for a power-of-two number of field elements.
@@ -147,7 +149,7 @@ impl<F: ButterflyKernels> TransformPlan<F> {
                 got: basis.len(),
             });
         }
-        if !factors::linearly_independent::<F>(&basis[..log_size]) {
+        if !crate::basis::independent::<F>(&basis[..log_size]) {
             return Err(PlanError::DependentBasis);
         }
         Self::construct(size, log_size, basis[..log_size].to_vec())
@@ -173,7 +175,7 @@ impl<F: ButterflyKernels> TransformPlan<F> {
                 got: basis.len(),
             });
         }
-        if !factors::linearly_independent::<F>(&basis[..log_size]) {
+        if !crate::basis::independent::<F>(&basis[..log_size]) {
             return Err(PlanError::DependentBasis);
         }
         let table = FactorTable::build(log_size, basis, shift).ok_or(PlanError::DependentBasis)?;
@@ -361,8 +363,8 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     /// Evaluate novel-basis coefficients at the plan's points, in place.
     ///
     /// # Errors
-    /// Returns [`TransformLengthError`] unless `values.len() == size`.
-    pub fn forward(&self, values: &mut [F::Elem]) -> Result<(), TransformLengthError> {
+    /// Returns [`TransformError`] unless `values.len() == size`.
+    pub fn forward(&self, values: &mut [F::Elem]) -> Result<(), TransformError> {
         self.check_len(values.len())?;
         if self.log_size != 0 {
             forward_node(values, &self.table.factors, 1, self.log_size);
@@ -374,8 +376,8 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     /// coefficients, in place.
     ///
     /// # Errors
-    /// Returns [`TransformLengthError`] unless `values.len() == size`.
-    pub fn inverse(&self, values: &mut [F::Elem]) -> Result<(), TransformLengthError> {
+    /// Returns [`TransformError`] unless `values.len() == size`.
+    pub fn inverse(&self, values: &mut [F::Elem]) -> Result<(), TransformError> {
         self.check_len(values.len())?;
         if self.log_size != 0 {
             inverse_node(values, &self.table.factors, 1, self.log_size);
@@ -383,22 +385,17 @@ impl<F: ButterflyKernels> TransformPlan<F> {
         Ok(())
     }
 
-    /// Forward transform over interleaved byte rows: row `i` (of `row_len`
-    /// bytes) holds the payload for transform point `i`, transformed in
-    /// place with SIMD-dispatched fused butterflies.
+    /// Evaluate novel-basis coefficient rows at the plan's points in place.
+    ///
+    /// Each row contains independent packed little-endian field-element lanes.
+    /// Row `i` starts as coefficient `i` and ends as evaluation `i`.
     ///
     /// # Errors
-    /// Returns [`TransformLengthError`] (lengths in bytes) unless
-    /// `rows.len() == size * row_len`.
-    ///
-    /// # Panics
-    /// Panics if `row_len` is zero, holds a partial trailing element, or the
-    /// complete byte length is not representable by [`usize`].
-    pub fn forward_bytes(
-        &self,
-        rows: &mut [u8],
-        row_len: usize,
-    ) -> Result<(), TransformLengthError> {
+    /// Returns [`TransformError`] (lengths in bytes) unless
+    /// `rows.len() == size * row_len`, `row_len` is nonzero and a multiple of
+    /// the element width, and the total byte length fits in [`usize`]. Errors
+    /// leave `rows` unchanged.
+    pub fn forward_bytes(&self, rows: &mut [u8], row_len: usize) -> Result<(), TransformError> {
         self.check_len_bytes(rows.len(), row_len)?;
         if self.log_size != 0 {
             crate::kernel::dispatch_butterfly!(
@@ -413,14 +410,7 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     ///
     /// # Errors
     /// As [`TransformPlan::forward_bytes`].
-    ///
-    /// # Panics
-    /// As [`TransformPlan::forward_bytes`].
-    pub fn inverse_bytes(
-        &self,
-        rows: &mut [u8],
-        row_len: usize,
-    ) -> Result<(), TransformLengthError> {
+    pub fn inverse_bytes(&self, rows: &mut [u8], row_len: usize) -> Result<(), TransformError> {
         self.check_len_bytes(rows.len(), row_len)?;
         if self.log_size != 0 {
             crate::kernel::dispatch_butterfly!(
@@ -437,13 +427,13 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     /// `derivative` is write-only: its prior contents are ignored.
     ///
     /// # Errors
-    /// Returns [`TransformLengthError`] unless both slices hold `size`
+    /// Returns [`TransformError`] unless both slices hold `size`
     /// elements.
     pub fn derivative_into(
         &self,
         derivative: &mut [F::Elem],
         coefficients: &[F::Elem],
-    ) -> Result<(), TransformLengthError> {
+    ) -> Result<(), TransformError> {
         self.check_len(derivative.len())?;
         self.check_len(coefficients.len())?;
         derivative.fill(F::Elem::ZERO);
@@ -469,18 +459,15 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     /// `derivative` is write-only and must not overlap `coefficients`.
     ///
     /// # Errors
-    /// Returns [`TransformLengthError`] (lengths in bytes) unless both
-    /// buffers hold `size` rows of `row_len` bytes.
-    ///
-    /// # Panics
-    /// Under the row-geometry conditions documented by
-    /// [`TransformPlan::forward_bytes`].
+    /// Returns [`TransformError`] (lengths in bytes) unless both buffers hold
+    /// `size` rows of `row_len` bytes, or for the invalid row geometry described
+    /// by [`TransformPlan::forward_bytes`]. Errors leave `derivative` unchanged.
     pub fn derivative_into_bytes(
         &self,
         derivative: &mut [u8],
         row_len: usize,
         coefficients: &[u8],
-    ) -> Result<(), TransformLengthError> {
+    ) -> Result<(), TransformError> {
         self.check_len_bytes(coefficients.len(), row_len)?;
         self.check_len_bytes(derivative.len(), row_len)?;
         let selected = backend_for::<F>();
@@ -536,15 +523,12 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     ///
     /// # Errors
     /// As [`TransformPlan::derivative_into_bytes`].
-    ///
-    /// # Panics
-    /// As [`TransformPlan::derivative_into_bytes`].
     pub(crate) fn derivative_into_bytes_sweep(
         &self,
         derivative: &mut [u8],
         row_len: usize,
         coefficients: &[u8],
-    ) -> Result<(), TransformLengthError> {
+    ) -> Result<(), TransformError> {
         self.check_len_bytes(coefficients.len(), row_len)?;
         self.check_len_bytes(derivative.len(), row_len)?;
         self.derivative_into_bytes_sweep_unchecked(derivative, row_len, coefficients);
@@ -563,17 +547,12 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     /// above its destination and has not yet been modified.
     ///
     /// # Errors
-    /// Returns [`TransformLengthError`] (lengths in bytes) unless `rows` holds
-    /// `size` rows of `row_len` bytes.
-    ///
-    /// # Panics
-    /// Under the row-geometry conditions documented by
-    /// [`TransformPlan::forward_bytes`].
+    /// As [`TransformPlan::forward_bytes`].
     pub fn derivative_plus_identity_bytes(
         &self,
         rows: &mut [u8],
         row_len: usize,
-    ) -> Result<(), TransformLengthError> {
+    ) -> Result<(), TransformError> {
         self.check_len_bytes(rows.len(), row_len)?;
         let factors = &self.prepared_derivative_factors;
         for index in 1..self.size {
@@ -601,15 +580,12 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     ///
     /// # Errors
     /// As [`TransformPlan::derivative_into_bytes`].
-    ///
-    /// # Panics
-    /// As [`TransformPlan::derivative_into_bytes`].
     pub(crate) fn derivative_into_bytes_gather(
         &self,
         derivative: &mut [u8],
         row_len: usize,
         coefficients: &[u8],
-    ) -> Result<(), TransformLengthError> {
+    ) -> Result<(), TransformError> {
         self.check_len_bytes(coefficients.len(), row_len)?;
         self.check_len_bytes(derivative.len(), row_len)?;
 
@@ -654,15 +630,12 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     ///
     /// # Errors
     /// As [`TransformPlan::derivative_into_bytes`].
-    ///
-    /// # Panics
-    /// As [`TransformPlan::derivative_into_bytes`].
     pub(crate) fn derivative_into_bytes_overwrite(
         &self,
         derivative: &mut [u8],
         row_len: usize,
         coefficients: &[u8],
-    ) -> Result<(), TransformLengthError> {
+    ) -> Result<(), TransformError> {
         self.check_len_bytes(coefficients.len(), row_len)?;
         self.check_len_bytes(derivative.len(), row_len)?;
         derivative_into_bytes_overwrite_node::<F>(
@@ -682,28 +655,21 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     /// evaluate repairs or missing points without paying for the full domain.
     ///
     /// # Errors
-    /// Returns [`TransformLengthError`] (lengths in bytes) unless
-    /// `rows.len() == size * row_len`.
-    ///
-    /// # Panics
-    /// Panics if `selected` is not strictly increasing or names a row
-    /// `>= size`, or under the row-geometry conditions documented by
-    /// [`TransformPlan::forward_bytes`].
+    /// As [`TransformPlan::forward_bytes`], and returns
+    /// [`TransformError::InvalidSelection`] if `selected` is not strictly
+    /// increasing or contains an index `>= size`. Errors leave `rows` unchanged.
     pub fn forward_bytes_selected(
         &self,
         rows: &mut [u8],
         row_len: usize,
         selected: &[usize],
-    ) -> Result<(), TransformLengthError> {
+    ) -> Result<(), TransformError> {
         self.check_len_bytes(rows.len(), row_len)?;
-        assert!(
-            selected.iter().all(|&index| index < self.size),
-            "selected row out of range"
-        );
-        assert!(
-            selected.windows(2).all(|pair| pair[0] < pair[1]),
-            "selected rows must be sorted and unique"
-        );
+        if selected.iter().any(|&index| index >= self.size)
+            || selected.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(TransformError::InvalidSelection);
+        }
         if self.log_size != 0 && !selected.is_empty() {
             crate::kernel::dispatch_butterfly!(
                 F,
@@ -725,23 +691,17 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     /// rows; other rows are left holding intermediate values.
     ///
     /// # Errors
-    /// Returns [`TransformLengthError`] (lengths in bytes) unless
-    /// `rows.len() == size * row_len`.
-    ///
-    /// # Panics
-    /// Panics unless `range.start <= range.end <= size`, or under the
-    /// row-geometry conditions documented by [`TransformPlan::forward_bytes`].
+    /// As [`TransformPlan::forward_bytes`], and returns
+    /// [`TransformError::InvalidRange`] unless `range.start <= range.end <= size`.
+    /// Errors leave `rows` unchanged.
     pub fn forward_bytes_range(
         &self,
         rows: &mut [u8],
         row_len: usize,
         range: Range<usize>,
-    ) -> Result<(), TransformLengthError> {
+    ) -> Result<(), TransformError> {
         self.check_len_bytes(rows.len(), row_len)?;
-        assert!(
-            range.start <= range.end && range.end <= self.size,
-            "range out of bounds"
-        );
+        Self::validate_range(&range, self.size)?;
         if self.log_size != 0 && !range.is_empty() {
             crate::kernel::dispatch_butterfly!(
                 F,
@@ -770,26 +730,26 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     /// forward transform.
     ///
     /// # Errors
-    /// Returns [`TransformLengthError`] (lengths in bytes) unless
-    /// `rows.len() == size * row_len`.
-    ///
-    /// # Panics
-    /// Panics unless `active <= size` and `range.start <= range.end <=
-    /// size`, or under the row-geometry conditions documented by
-    /// [`TransformPlan::forward_bytes`].
+    /// As [`TransformPlan::forward_bytes`], and returns
+    /// [`TransformError::InvalidActivePrefix`] unless `active <= size`, or
+    /// [`TransformError::InvalidRange`] unless `range.start <= range.end <= size`.
+    /// Errors leave `rows` unchanged. The zero coefficient tail is a caller
+    /// precondition and is not checked.
     pub fn forward_bytes_truncated_range(
         &self,
         rows: &mut [u8],
         row_len: usize,
         active: usize,
         range: Range<usize>,
-    ) -> Result<(), TransformLengthError> {
+    ) -> Result<(), TransformError> {
         self.check_len_bytes(rows.len(), row_len)?;
-        assert!(active <= self.size, "active prefix out of range");
-        assert!(
-            range.start <= range.end && range.end <= self.size,
-            "range out of bounds"
-        );
+        if active > self.size {
+            return Err(TransformError::InvalidActivePrefix {
+                active,
+                size: self.size,
+            });
+        }
+        Self::validate_range(&range, self.size)?;
         if self.log_size != 0 && !range.is_empty() && active != 0 {
             crate::kernel::dispatch_butterfly!(
                 F,
@@ -807,49 +767,44 @@ impl<F: ButterflyKernels> TransformPlan<F> {
         Ok(())
     }
 
-    /// Evaluate the `size / 2` novel-basis coefficients in `rows` at the
-    /// high coset (transform points `size/2 .. size`), writing the first
-    /// `range` evaluations in place.
+    /// Evaluate `size / 2` novel-basis coefficients at the high coset.
     ///
-    /// This is the forward subtree rooted at node 3 (the high child of the
-    /// root). The fused systematic encoder calls it directly on the inverse
-    /// output so repair evaluations need neither a copy into the padded
-    /// high half nor a full-domain workspace.
+    /// `rows` holds the half-domain coefficient vector. Only rows in `range`
+    /// are final outputs; output row `i` is the evaluation at plan point
+    /// `size / 2 + i`. Other rows may hold intermediate values. This operation
+    /// uses the high child of the transform root without a full-domain buffer.
     ///
     /// # Errors
-    /// Returns [`TransformLengthError`] unless `size >= 4` (reported as
-    /// `expected: 4`) and `rows.len() == (size / 2) * row_len`.
-    ///
-    /// # Panics
-    /// Panics unless `range.start <= range.end <= size / 2`, or under the
-    /// row-geometry conditions documented by [`TransformPlan::forward_bytes`].
+    /// Returns [`TransformError::UnsupportedPlanSize`] if `size < 4`,
+    /// [`TransformError::BufferLength`] unless
+    /// `rows.len() == (size / 2) * row_len`, or [`TransformError::InvalidRange`]
+    /// unless `range.start <= range.end <= size / 2`. Invalid row geometry is
+    /// rejected as in [`TransformPlan::forward_bytes`], using the half-domain
+    /// total byte length. Errors leave `rows` unchanged.
     pub fn forward_bytes_high_coset_range(
         &self,
         rows: &mut [u8],
         row_len: usize,
         range: Range<usize>,
-    ) -> Result<(), TransformLengthError> {
+    ) -> Result<(), TransformError> {
         if self.log_size < 2 {
-            return Err(TransformLengthError {
-                expected: 4,
-                got: self.size,
+            return Err(TransformError::UnsupportedPlanSize {
+                size: self.size,
+                minimum: 4,
             });
         }
         let half = self.size / 2;
-        Self::validate_row_len(row_len);
+        Self::validate_row_len(row_len)?;
         let expected = half
             .checked_mul(row_len)
-            .expect("transform byte length overflow");
+            .ok_or(TransformError::GeometryOverflow)?;
         if rows.len() != expected {
-            return Err(TransformLengthError {
+            return Err(TransformError::BufferLength {
                 expected,
                 got: rows.len(),
             });
         }
-        assert!(
-            range.start <= range.end && range.end <= half,
-            "range out of bounds"
-        );
+        Self::validate_range(&range, half)?;
         if !range.is_empty() {
             crate::kernel::dispatch_butterfly!(
                 F,
@@ -871,23 +826,27 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     /// [`TransformPlan::inverse_bytes_truncated_scratch`]
     /// for the given active coefficient prefix.
     ///
-    /// # Panics
-    /// Panics unless `1 <= active <= size`.
-    #[must_use]
-    pub fn inverse_bytes_truncated_scratch_rows(&self, active: usize) -> usize {
-        assert!(
-            active > 0 && active <= self.size,
-            "active prefix out of range"
-        );
+    /// # Errors
+    /// Returns [`TransformError::InvalidActivePrefix`] unless `1 <= active <= size`.
+    pub fn inverse_bytes_truncated_scratch_rows(
+        &self,
+        active: usize,
+    ) -> Result<usize, TransformError> {
+        if active == 0 || active > self.size {
+            return Err(TransformError::InvalidActivePrefix {
+                active,
+                size: self.size,
+            });
+        }
         let mut row_count = self.size;
         while active < row_count {
             let half_rows = row_count / 2;
             if active > half_rows {
-                return half_rows;
+                return Ok(half_rows);
             }
             row_count = half_rows;
         }
-        0
+        Ok(0)
     }
 
     /// Truncated inverse transform: recovers the lowest `active` novel-
@@ -907,27 +866,28 @@ impl<F: ButterflyKernels> TransformPlan<F> {
     /// without any diagnostic.
     ///
     /// # Errors
-    /// Returns [`TransformLengthError`] (lengths in bytes) unless
-    /// `rows.len() == size * row_len` and `scratch.len() >=
-    /// inverse_bytes_truncated_scratch_rows(active) * row_len`.
-    ///
-    /// # Panics
-    /// Panics unless `1 <= active <= size`, or under the row-geometry
-    /// conditions documented by [`TransformPlan::forward_bytes`].
+    /// As [`TransformPlan::forward_bytes`], and returns
+    /// [`TransformError::InvalidActivePrefix`] unless `1 <= active <= size`,
+    /// [`TransformError::ScratchTooSmall`] unless `scratch` holds at least
+    /// [`Self::inverse_bytes_truncated_scratch_rows`]`(active)?` rows, or
+    /// [`TransformError::GeometryOverflow`] if the scratch byte length cannot
+    /// be represented by [`usize`]. Errors leave `rows` and `scratch` unchanged.
     pub fn inverse_bytes_truncated_scratch(
         &self,
         rows: &mut [u8],
         row_len: usize,
         active: usize,
         scratch: &mut [u8],
-    ) -> Result<(), TransformLengthError> {
+    ) -> Result<(), TransformError> {
         self.check_len_bytes(rows.len(), row_len)?;
-        let scratch_rows = self.inverse_bytes_truncated_scratch_rows(active);
-        let expected = scratch_rows * row_len;
-        if scratch.len() < expected {
-            return Err(TransformLengthError {
-                expected,
-                got: scratch.len(),
+        let scratch_rows = self.inverse_bytes_truncated_scratch_rows(active)?;
+        let required = scratch_rows
+            .checked_mul(row_len)
+            .ok_or(TransformError::GeometryOverflow)?;
+        if scratch.len() < required {
+            return Err(TransformError::ScratchTooSmall {
+                required,
+                available: scratch.len(),
             });
         }
         if self.log_size != 0 {
@@ -947,33 +907,49 @@ impl<F: ButterflyKernels> TransformPlan<F> {
         Ok(())
     }
 
-    fn check_len(&self, got: usize) -> Result<(), TransformLengthError> {
+    fn check_len(&self, got: usize) -> Result<(), TransformError> {
         if got == self.size {
             Ok(())
         } else {
-            Err(TransformLengthError {
+            Err(TransformError::BufferLength {
                 expected: self.size,
                 got,
             })
         }
     }
 
-    fn check_len_bytes(&self, got: usize, row_len: usize) -> Result<(), TransformLengthError> {
-        Self::validate_row_len(row_len);
+    fn check_len_bytes(&self, got: usize, row_len: usize) -> Result<(), TransformError> {
+        Self::validate_row_len(row_len)?;
         let expected = self
             .size
             .checked_mul(row_len)
-            .expect("transform byte length overflow");
+            .ok_or(TransformError::GeometryOverflow)?;
         if got == expected {
             Ok(())
         } else {
-            Err(TransformLengthError { expected, got })
+            Err(TransformError::BufferLength { expected, got })
         }
     }
 
-    fn validate_row_len(row_len: usize) {
-        assert_ne!(row_len, 0, "row length must be nonzero");
-        assert_eq!(row_len % F::BYTES, 0, "partial trailing element");
+    fn validate_row_len(row_len: usize) -> Result<(), TransformError> {
+        if row_len == 0 || !row_len.is_multiple_of(F::BYTES) {
+            return Err(TransformError::InvalidRowLength {
+                row_len,
+                element_bytes: F::BYTES,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_range(range: &Range<usize>, size: usize) -> Result<(), TransformError> {
+        if range.start > range.end || range.end > size {
+            return Err(TransformError::InvalidRange {
+                start: range.start,
+                end: range.end,
+                size,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -1116,7 +1092,7 @@ mod tests {
             let mut short = random_elements::<F>(&mut 7, 4);
             assert_eq!(
                 plan.forward(&mut short),
-                Err(TransformLengthError {
+                Err(TransformError::BufferLength {
                     expected: 8,
                     got: 4
                 })
@@ -1711,7 +1687,7 @@ mod tests {
                     let mut evaluations = coefficients.clone();
                     plan.forward(&mut evaluations).unwrap();
                     let mut rows = pack_elements::<F>(&evaluations);
-                    let scratch_rows = plan.inverse_bytes_truncated_scratch_rows(active);
+                    let scratch_rows = plan.inverse_bytes_truncated_scratch_rows(active).unwrap();
                     let mut scratch = ::alloc::vec![0u8; scratch_rows * F::BYTES];
                     plan.inverse_bytes_truncated_scratch(&mut rows, F::BYTES, active, &mut scratch)
                         .unwrap();
@@ -1744,33 +1720,33 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "sorted and unique")]
-    fn forward_selected_rejects_unsorted() {
+    fn rejected_geometry_leaves_rows_unchanged() {
         let plan = TransformPlan::<Gf16>::new(8).unwrap();
-        let mut rows = [0u8; 16];
-        let _ = plan.forward_bytes_selected(&mut rows, 2, &[5, 2]);
-    }
-
-    #[test]
-    #[should_panic(expected = "range out of bounds")]
-    fn forward_range_rejects_out_of_bounds() {
-        let plan = TransformPlan::<Gf16>::new(8).unwrap();
-        let mut rows = [0u8; 16];
-        let _ = plan.forward_bytes_range(&mut rows, 2, 0..9);
-    }
-    #[test]
-    #[should_panic(expected = "row length must be nonzero")]
-    fn byte_rows_reject_zero_width_before_walking() {
-        let plan = TransformPlan::<Gf8B>::new(4).unwrap();
-        let _ = plan.forward_bytes_selected(&mut [], 0, &[0]);
-    }
-
-    #[test]
-    #[should_panic(expected = "transform byte length overflow")]
-    fn byte_rows_reject_unrepresentable_geometry() {
-        let plan = TransformPlan::<Gf8B>::new(4).unwrap();
-        let row_len = 1usize << (usize::BITS - 2);
-        let _ = plan.forward_bytes(&mut [], row_len);
+        let mut rows = [0x5au8; 16];
+        assert_eq!(
+            plan.forward_bytes_selected(&mut rows, 2, &[5, 2]),
+            Err(TransformError::InvalidSelection)
+        );
+        assert_eq!(
+            plan.forward_bytes_range(&mut rows, 2, 0..9),
+            Err(TransformError::InvalidRange {
+                start: 0,
+                end: 9,
+                size: 8
+            })
+        );
+        assert_eq!(
+            plan.forward_bytes(&mut rows, 0),
+            Err(TransformError::InvalidRowLength {
+                row_len: 0,
+                element_bytes: 2
+            })
+        );
+        assert_eq!(
+            plan.forward_bytes(&mut rows, usize::MAX - 1),
+            Err(TransformError::GeometryOverflow)
+        );
+        assert_eq!(rows, [0x5a; 16]);
     }
 
     /// Schoolbook polynomial product over dense monomial coefficients.

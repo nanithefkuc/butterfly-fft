@@ -1,32 +1,119 @@
 //! Error types for plan construction and transform execution.
 
-/// Error returned when a transform input has the wrong length.
+/// Error returned when additive-transform execution inputs are invalid.
 ///
+/// Errors are reported before any destination or scratch is mutated.
 /// Element-domain methods report lengths in field elements; byte-row
 /// methods report lengths in bytes (documented per method).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TransformLengthError {
-    /// Length required by the plan.
-    pub expected: usize,
-    /// Length supplied by the caller.
-    pub got: usize,
+#[non_exhaustive]
+pub enum TransformError {
+    /// A transform buffer has the wrong length.
+    BufferLength {
+        /// Length required by the operation.
+        expected: usize,
+        /// Length supplied by the caller.
+        got: usize,
+    },
+    /// The caller-provided workspace is too short.
+    ScratchTooSmall {
+        /// Minimum workspace length.
+        required: usize,
+        /// Workspace length supplied by the caller.
+        available: usize,
+    },
+    /// A row length is zero or not a whole number of field elements.
+    InvalidRowLength {
+        /// The offending row length, in bytes.
+        row_len: usize,
+        /// Width of one field element, in bytes.
+        element_bytes: usize,
+    },
+    /// A derived buffer or workspace length cannot be represented by `usize`.
+    GeometryOverflow,
+    /// Selected indices are out of range, nonascending, or duplicated.
+    InvalidSelection,
+    /// An output range is reversed or extends beyond the domain.
+    InvalidRange {
+        /// Requested inclusive start.
+        start: usize,
+        /// Requested exclusive end.
+        end: usize,
+        /// Number of rows in the operation's domain.
+        size: usize,
+    },
+    /// The active coefficient prefix is outside the operation's valid bounds.
+    InvalidActivePrefix {
+        /// Requested active prefix length.
+        active: usize,
+        /// Number of rows in the plan.
+        size: usize,
+    },
+    /// The operation requires a larger transform plan.
+    UnsupportedPlanSize {
+        /// Number of rows in the supplied plan.
+        size: usize,
+        /// Smallest supported plan size.
+        minimum: usize,
+    },
 }
 
-impl ::core::fmt::Display for TransformLengthError {
+impl ::core::fmt::Display for TransformError {
     fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        write!(
-            formatter,
-            "wrong transform length: expected {}, got {}",
-            self.expected, self.got
-        )
+        match self {
+            Self::BufferLength { expected, got } => {
+                write!(
+                    formatter,
+                    "wrong transform length: expected {expected}, got {got}"
+                )
+            }
+            Self::ScratchTooSmall {
+                required,
+                available,
+            } => {
+                write!(
+                    formatter,
+                    "scratch too small: need {required}, have {available}"
+                )
+            }
+            Self::InvalidRowLength {
+                row_len,
+                element_bytes,
+            } => {
+                write!(
+                    formatter,
+                    "row length {row_len} is zero or not a whole number of {element_bytes}-byte elements"
+                )
+            }
+            Self::GeometryOverflow => write!(formatter, "transform geometry overflowed"),
+            Self::InvalidSelection => write!(
+                formatter,
+                "selected rows must be in range, sorted, and unique"
+            ),
+            Self::InvalidRange { start, end, size } => {
+                write!(formatter, "range {start}..{end} is invalid for {size} rows")
+            }
+            Self::InvalidActivePrefix { active, size } => {
+                write!(
+                    formatter,
+                    "active prefix {active} is invalid for {size} rows"
+                )
+            }
+            Self::UnsupportedPlanSize { size, minimum } => {
+                write!(
+                    formatter,
+                    "plan size {size} is unsupported: need at least {minimum}"
+                )
+            }
+        }
     }
 }
 
-#[cfg(feature = "std")]
-impl ::std::error::Error for TransformLengthError {}
+impl ::core::error::Error for TransformError {}
 
 /// Error returned when a transform plan cannot be constructed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PlanError {
     /// Transform size was zero or not a power of two.
     InvalidSize {
@@ -98,11 +185,11 @@ impl ::core::fmt::Display for PlanError {
     }
 }
 
-#[cfg(feature = "std")]
-impl ::std::error::Error for PlanError {}
+impl ::core::error::Error for PlanError {}
 /// Error returned by multiplicative-transform plan construction and
 /// execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NttError {
     /// Transform size was zero or not a power of two.
     InvalidSize {
@@ -147,10 +234,24 @@ pub enum NttError {
     },
     /// The supplied scratch row temporary is shorter than the requested
     /// row length.
-    ScratchTooSmall {
+    ScratchRowTooSmall {
         /// Row bytes required.
         required: usize,
         /// Row bytes the scratch was built for.
+        available: usize,
+    },
+    /// The supplied scratch batch is shorter than the required byte length.
+    ScratchBatchTooSmall {
+        /// Batch bytes required.
+        required: usize,
+        /// Batch bytes available.
+        available: usize,
+    },
+    /// The supplied scratch transpose buffer is shorter than required.
+    ScratchTransposeTooSmall {
+        /// Transpose bytes required.
+        required: usize,
+        /// Transpose bytes available.
         available: usize,
     },
 }
@@ -200,7 +301,7 @@ impl ::core::fmt::Display for NttError {
                     "scratch was built for {scratch_element_bytes}-byte elements, but this plan transforms {field_element_bytes}-byte elements"
                 )
             }
-            Self::ScratchTooSmall {
+            Self::ScratchRowTooSmall {
                 required,
                 available,
             } => {
@@ -209,9 +310,26 @@ impl ::core::fmt::Display for NttError {
                     "scratch too small: need {required} row bytes, have {available}"
                 )
             }
+            Self::ScratchBatchTooSmall {
+                required,
+                available,
+            } => {
+                write!(
+                    formatter,
+                    "scratch batch too small: need {required} bytes, have {available}"
+                )
+            }
+            Self::ScratchTransposeTooSmall {
+                required,
+                available,
+            } => {
+                write!(
+                    formatter,
+                    "scratch transpose too small: need {required} bytes, have {available}"
+                )
+            }
         }
     }
 }
 
-#[cfg(feature = "std")]
-impl ::std::error::Error for NttError {}
+impl ::core::error::Error for NttError {}

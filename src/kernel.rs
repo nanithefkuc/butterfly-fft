@@ -59,17 +59,20 @@ use simdispatch::Selection;
 ))]
 use archmage::SimdToken;
 
-/// The tiers `butterfly-fft` implements butterfly kernels for, in
-/// detection-preference order: the shared ladder minus `V1` (the shuffle
-/// kernels need SSSE3), minus `Wasm128` (no dedicated butterflies), and minus
-/// the deferred 64-byte AVX-512 tier (`V4x`). `AArch64` keeps both `NeonAes`
-/// and `Neon` so `PMULL` hosts resolve to the crypto tier rather than silently
-/// reporting `Neon`.
+/// The butterfly tiers compiled into this build, in detection-preference
+/// order. SIMD tiers require `simd` and their target architecture; scalar is
+/// always available. `AArch64` keeps both `NeonAes` and `Neon` so `PMULL`
+/// hosts resolve to the crypto tier rather than silently reporting `Neon`.
 pub const BUTTERFLY_FFT_TIERS: &[Backend] = &[
+    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     Backend::V3GfniCrypto,
+    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     Backend::V3,
+    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     Backend::V2,
+    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
     Backend::NeonAes,
+    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
     Backend::Neon,
     Backend::Scalar,
 ];
@@ -539,15 +542,29 @@ mod tests {
     use fgf::field::{Elem, Field};
     use fgf::{FanPaar64, Gf8B, Gf16, Gf32};
 
-    #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
-    /// Whether the host resolves to one of the tiers in `supported`.
-    /// Detection is single-source (`simdispatch`) and `SIMD_BACKEND` is
-    /// honored, so `SIMD_BACKEND=scalar` also skips the SIMD kernel tests.
-    fn host_supports(supported: &'static [Backend]) -> bool {
-        simdispatch::Selection::new("SIMD_BACKEND")
-            .supports(supported)
-            .resolve()
-            != Backend::Scalar
+    #[cfg(all(
+        feature = "simd",
+        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn direct_kernel_available<F: Field>(backend: Backend, available: bool) -> bool {
+        use ::std::io::Write;
+
+        // Write directly: libtest captures print macros on passing tests,
+        // which would hide unsupported tiers during an ordinary sweep.
+        writeln!(
+            ::std::io::stderr().lock(),
+            "INFO direct kernel check backend={} field={} status={} reason={}",
+            backend.name(),
+            ::core::any::type_name::<F>(),
+            if available { "running" } else { "skipped" },
+            if available {
+                "host_supported"
+            } else {
+                "host_unsupported"
+            },
+        )
+        .expect("write direct-kernel capability report");
+        available
     }
 
     #[test]
@@ -569,7 +586,7 @@ mod tests {
         // self-consistency a resolved GFNI tier implies the host really has
         // AVX2+GFNI (garble guard for the selection wiring).
         if backend() == Backend::V3GfniCrypto {
-            assert!(host_supports(&[Backend::V3GfniCrypto]));
+            assert!(X86_TOKENS.v3_gfni_crypto.is_some());
         }
     }
 
@@ -843,15 +860,16 @@ mod tests {
 
     #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
     fn differential_x86<F: ButterflyKernels>(coefficients: &[F::Elem]) {
-        if host_supports(&[Backend::V3GfniCrypto]) {
+        if direct_kernel_available::<F>(Backend::V3GfniCrypto, X86_TOKENS.v3_gfni_crypto.is_some())
+        {
             differential_backend::<F, GfniBackend<F>>("gfni", coefficients);
             differential_backend_trivial_coefficients::<F, GfniBackend<F>>("gfni");
         }
-        if host_supports(&[Backend::V3]) {
+        if direct_kernel_available::<F>(Backend::V3, X86_TOKENS.v3.is_some()) {
             differential_backend::<F, Avx2Backend<F>>("avx2", coefficients);
             differential_backend_trivial_coefficients::<F, Avx2Backend<F>>("avx2");
         }
-        if host_supports(&[Backend::V2]) {
+        if direct_kernel_available::<F>(Backend::V2, X86_TOKENS.v2.is_some()) {
             differential_backend::<F, Ssse3Backend<F>>("ssse3", coefficients);
             differential_backend_trivial_coefficients::<F, Ssse3Backend<F>>("ssse3");
         }
@@ -869,11 +887,15 @@ mod tests {
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
     #[test]
     fn neon_backends_match_scalar_in_both_directions() {
+        if !direct_kernel_available::<Gf8B>(Backend::Neon, NEON_TOKEN.is_some()) {
+            return;
+        }
         differential_backend::<Gf8B, NeonBackend<Gf8B>>(
             "neon",
             &[0x00, 0x01, 0x02, 0x53, 0xff].map(fgf::gf8b::Elem::from_raw),
         );
         differential_backend_trivial_coefficients::<Gf8B, NeonBackend<Gf8B>>("neon");
+        direct_kernel_available::<Gf16>(Backend::Neon, true);
         differential_backend::<Gf16, NeonBackend<Gf16>>(
             "neon",
             &[0x0000, 0x0001, 0x0108, 0x9b37, 0xffff].map(fgf::gf16::Elem::from_raw),
@@ -883,16 +905,14 @@ mod tests {
 
     /// The tier entries of a field without dedicated butterflies inherit the
     /// portable scalar kernels: every default body must agree with `scalar`
-    /// in both directions. Capability probes are test-local so the GFNI and
-    /// NEON entries skip, rather than panic, on hosts without the tier.
+    /// in both directions. Cached capability tokens make unsupported entries
+    /// skip explicitly rather than panic, independently of `SIMD_BACKEND`.
     #[cfg(all(
         feature = "simd",
         any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
     fn kernelless_field_tier_entries_inherit_scalar() {
-        use archmage::SimdToken;
-
         fn entries_match_scalar<F: TierButterflies>(
             label: &str,
             coefficient: F::Elem,
@@ -920,7 +940,11 @@ mod tests {
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
-            if let Some(token) = archmage::X64V3GfniCryptoToken::summon() {
+            if direct_kernel_available::<Gf32>(
+                Backend::V3GfniCrypto,
+                X86_TOKENS.v3_gfni_crypto.is_some(),
+            ) {
+                let token = v3_gfni_crypto_token();
                 entries_match_scalar::<Gf32>(
                     "gfni defaults",
                     <Gf32 as Field>::Elem::ONE,
@@ -928,7 +952,8 @@ mod tests {
                     |low, high, c| Gf32::fused_inverse_gfni(token, low, high, c),
                 );
             }
-            if let Some(token) = archmage::X64V3Token::summon() {
+            if direct_kernel_available::<Gf32>(Backend::V3, X86_TOKENS.v3.is_some()) {
+                let token = v3_token();
                 entries_match_scalar::<Gf32>(
                     "avx2 defaults",
                     <Gf32 as Field>::Elem::ZERO,
@@ -936,7 +961,8 @@ mod tests {
                     |low, high, c| Gf32::fused_inverse_avx2(token, low, high, c),
                 );
             }
-            if let Some(token) = archmage::X64V2Token::summon() {
+            if direct_kernel_available::<Gf32>(Backend::V2, X86_TOKENS.v2.is_some()) {
+                let token = v2_token();
                 entries_match_scalar::<Gf32>(
                     "ssse3 defaults",
                     <Gf32 as Field>::Elem::ONE,
@@ -948,7 +974,8 @@ mod tests {
 
         #[cfg(target_arch = "aarch64")]
         {
-            if let Some(token) = archmage::NeonToken::summon() {
+            if direct_kernel_available::<Gf32>(Backend::Neon, NEON_TOKEN.is_some()) {
+                let token = neon_token();
                 entries_match_scalar::<Gf32>(
                     "neon defaults",
                     <Gf32 as Field>::Elem::ONE,

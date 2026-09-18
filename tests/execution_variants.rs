@@ -290,7 +290,7 @@ fn inverse_truncated_recovers<F: ButterflyKernels>(seed: u64) {
             let evaluations = forward_lanes(&plan, &lanes);
 
             let mut rows = pack::<F>(&evaluations, size);
-            let scratch_rows = plan.inverse_bytes_truncated_scratch_rows(active);
+            let scratch_rows = plan.inverse_bytes_truncated_scratch_rows(active).unwrap();
             // Poison the scratch: a walker that reads it before writing must
             // not pass.
             let mut scratch = vec![0xA5u8; scratch_rows * row_len];
@@ -314,7 +314,7 @@ fn scratch_sizing_is_tight() {
     let plan = TransformPlan::<Gf16>::new(64).unwrap();
     let row_len = 2;
     for active in 1..=64usize {
-        let rows_needed = plan.inverse_bytes_truncated_scratch_rows(active);
+        let rows_needed = plan.inverse_bytes_truncated_scratch_rows(active).unwrap();
         if rows_needed == 0 {
             continue;
         }
@@ -326,4 +326,37 @@ fn scratch_sizing_is_tight() {
             "active {active} accepted undersized scratch"
         );
     }
+}
+
+#[test]
+fn invalid_geometry_preserves_destination_and_workspace() {
+    use butterfly_fft::TransformError;
+
+    let plan = TransformPlan::<Gf16>::new(8).unwrap();
+    let mut rows = [0x5au8; 16];
+    let mut scratch = [0xa5u8; 8];
+    assert_eq!(
+        plan.forward_bytes_selected(&mut rows, 2, &[8]),
+        Err(TransformError::InvalidSelection)
+    );
+    assert_eq!(
+        plan.forward_bytes_truncated_range(&mut rows, 2, 9, 0..8),
+        Err(TransformError::InvalidActivePrefix { active: 9, size: 8 })
+    );
+    assert_eq!(
+        plan.inverse_bytes_truncated_scratch(&mut rows, 2, 0, &mut scratch),
+        Err(TransformError::InvalidActivePrefix { active: 0, size: 8 })
+    );
+    assert_eq!(rows, [0x5a; 16]);
+    assert_eq!(scratch, [0xa5; 8]);
+
+    let small = TransformPlan::<Gf16>::new(2).unwrap();
+    assert_eq!(
+        small.forward_bytes_high_coset_range(&mut rows[..2], 2, 0..1),
+        Err(TransformError::UnsupportedPlanSize {
+            size: 2,
+            minimum: 4
+        })
+    );
+    assert_eq!(rows, [0x5a; 16]);
 }

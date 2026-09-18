@@ -22,11 +22,11 @@
 use std::hint::black_box;
 use std::time::Duration;
 
-use butterfly_fft::ntt::{NttPlan, NttScratch};
+use butterfly_fft::ntt::NttPlan;
 use butterfly_fft_bench::FastEccNttBuffer;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use fgf::Goldilocks;
-use fgf::field::{Elem, Field};
+use fgf::field::Field;
 
 const SIZES: [usize; 6] = [64, 256, 1024, 4096, 16384, 65536];
 const LANES: [usize; 3] = [1, 4, 16];

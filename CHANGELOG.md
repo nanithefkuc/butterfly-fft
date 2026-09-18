@@ -7,6 +7,37 @@ releases follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-18
+
+This dated entry describes the prepared 1.0.0 changes; it does not assert
+that the package has been published.
+
+### Changed (checked execution)
+
+- **Breaking:** additive byte-row execution and coefficient conversion return
+  `TransformError` for invalid row lengths and overflowing geometry instead
+  of panicking. Selected, range, and truncated operations also return errors
+  for invalid selections, ranges, and active prefixes. Handle or propagate
+  these errors rather than catching a panic; rejected calls leave destination
+  and scratch buffers unchanged.
+- **Breaking:** `inverse_bytes_truncated_scratch_rows(active)` now returns
+  `Result<usize, TransformError>`. Use
+  `plan.inverse_bytes_truncated_scratch_rows(active)?` before allocating
+  workspace, and handle an invalid active prefix.
+- **Breaking:** `TransformLengthError` is replaced by the non-exhaustive
+  `TransformError` enum. Replace struct construction or field access with
+  `TransformError::BufferLength { expected, got }`, and handle geometry and
+  workspace variants separately. Add a wildcard arm when matching any public
+  error enum. `PlanError`, `TransformError`, and `NttError` implement
+  `core::error::Error` with or without `std`.
+- **Breaking:** four-step NTT experiments use `internals::FourStepPlan` and
+  `internals::FourStepScratch`. Replace `internals::ntt_forward_fourstep`
+  with explicit `FourStepPlan::<F>::new(size)`, `.scratch(row_len)`, and
+  `.forward_bytes_scratch(rows, row_len, &mut scratch)`. Stable `NttPlan`
+  preparation no longer builds experimental subplans, and `NttScratch` no
+  longer contains experimental transpose state. The implementation compiles
+  regardless of `internals`; the feature only exposes the facade.
+
 ### Changed (kernels)
 
 - The SIMD butterfly kernels are safe `archmage` capability-token functions:
@@ -28,21 +59,17 @@ releases follow [Semantic Versioning](https://semver.org/).
 
 ### Changed (NTT execution schedule)
 
-- `NttPlan` butterfly stages select among three measured schedules: the
-  fused register form (fields without vector elementwise kernels, every
-  row width), a batched region form — one elementwise twiddle multiply,
-  one region copy, one region subtract and add per bounded batch instead
-  of four op calls per pair — and the packed op-call form at and above
-  128-byte rows, where its broadcast multiply reads no twiddle stream and
-  wins. The pinned fgf moves to 1.1.0, whose QuadMersenne31 vector
-  kernels and Goldilocks correctness fix the wide-row paths ride. All
-  three schedules stay reachable through `internals::ntt_forward_fused`,
-  `internals::ntt_forward_batched`, and `internals::ntt_forward_packed`,
-  and the campaign record, including a measured rejection of a four-step
-  cache-blocked decomposition, lives in `BENCHMARKS.md`. `NttScratch`
-  grows the batched schedule's two bounded region buffers, and scratch
-  reused across plans of different sizes is rejected with
-  `NttError::ScratchTooSmall` before anything is written.
+- `NttPlan` selects fused, batched, or packed butterfly execution from the
+  row geometry and field backend. Explicit controls remain available through
+  `internals::ntt_forward_fused`, `ntt_forward_batched`, and
+  `ntt_forward_packed`. These free functions take destination, row length,
+  plan, and scratch in that order.
+- **Breaking:** `NttError::ScratchTooSmall` is replaced by
+  `ScratchRowTooSmall`, `ScratchBatchTooSmall`, and `ScratchTransposeTooSmall`.
+  Match the relevant capacity variant rather than interpreting every shortage
+  as row bytes. `NttScratch` includes bounded batch buffers; reuse with another
+  plan requires sufficient row and batch capacity. Four-step transpose capacity
+  is checked separately by `FourStepScratch`.
 
 ### Changed (naming and layout, fgf alignment)
 
@@ -53,7 +80,7 @@ releases follow [Semantic Versioning](https://semver.org/).
   `derivative_into_bytes(derivative, row_len, coefficients)`. The tuning
   schedules follow as `internals::derivative_into_bytes_sweep`,
   `derivative_into_bytes_gather`, and `derivative_into_bytes_overwrite`,
-  all `(plan, derivative, row_len, coefficients)`.
+  all `(derivative, row_len, plan, coefficients)`.
 - **Breaking:** `_scratch` marks every workspace-taking operation:
   `NttPlan::forward_bytes_scratch` and `inverse_bytes_scratch` (from
   `forward_bytes` / `inverse_bytes`),
@@ -80,8 +107,7 @@ releases follow [Semantic Versioning](https://semver.org/).
   README and package description cover the NTT family beside the additive
   FFT.
 - `missing_docs` is denied rather than warned.
-- `BENCHMARKS.md` records the derivative-schedule crossovers and the pinned
-  public-transform and competitor measurements.
+- `BENCHMARKS.md` contains public API and competitor measurements only.
 
 ### Changed (API reshape)
 
@@ -97,9 +123,8 @@ releases follow [Semantic Versioning](https://semver.org/).
 - **Breaking:** `NttError` lives in `error` (re-exported from `ntt`).
 - **Breaking:** the per-tier `unsafe` kernel entries are no longer public
   API. `ButterflyKernels` keeps only `BUTTERFLY_TIERS`; the kernel entries
-  moved to a crate-private trait behind a private dispatch proof, after
-  `fgf`'s `KernelDispatch`/`RawDispatch` pattern. The public surface is
-  fully safe.
+  moved to a crate-private trait whose safe functions require genuine
+  `archmage` capability tokens. The public surface is fully safe.
 - `xor_scaled_bytes` and `xor_scaled_bytes_rows` are no longer public:
   row scaling is `fgf::ops::mul_add`'s contract, and this crate's public
   kernels are the fused butterflies it owns.
@@ -125,11 +150,10 @@ releases follow [Semantic Versioning](https://semver.org/).
 - `Gf8D` (the `0x11D` Reed–Solomon interop field) implements
   `ButterflyKernels`, so additive plans and basis conversion work over it on
   the portable scalar backend.
-- The `internals` surface is now a single facade: the tuning derivative
-  schedules and factor-table inspection moved from `#[cfg(feature =
-  "internals")]` methods to `internals::derivative_into_bytes_sweep`,
-  `derivative_into_bytes_gather`, `derivative_into_bytes_overwrite`, and
-  `internals::plan_table`, taking the plan as their first argument.
+- The `internals` surface is a single re-export-only facade. Tuning derivative
+  functions take `(derivative, row_len, plan, coefficients)`;
+  `internals::plan_table` takes the plan. Their implementation no longer
+  depends on the feature being enabled.
 - `TransformPlan::inverse_bytes_truncated_scratch` documents its
   precondition: the evaluations must be the forward transform of a
   polynomial whose novel-basis coefficients `active..` vanish.
@@ -148,8 +172,7 @@ releases follow [Semantic Versioning](https://semver.org/).
   `inverse_bytes_scratch` run over packed byte rows with no allocation and
   no coefficient preparation.
   Goldilocks and `QuadMersenne31` admit sizes to `2^20`; base `Mersenne31`
-  admits only size 2 and the binary fields only the identity, all decided by
-  the `size | |F| - 1` rule rather than a field special case.
+  admits sizes one and two, and binary fields admit only the identity.
 - `TransformPlan::vanishing_polynomial` returns the dense monomial
   coefficients of the domain vanishing polynomial `G(X)` for both subspace and
   affine-coset domains, and `TransformPlan::shift` exposes the coset shift.
@@ -161,11 +184,11 @@ releases follow [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **Breaking:** Field types come from the crates.io release `fgf` 1.0.0
-  instead of the git dependency. Consumers must use the same registry
-  dependency to share field types with transform plans. Serialization uses
-  `Field::decode`/`Field::encode`, and tower decomposition uses
-  `Elem::to_components`. The minimum supported Rust version is 1.93.
+- **Breaking:** field types come from the exact registry dependency
+  `fgf = "=1.1.0"` instead of the git dependency. Consumers must use the same
+  package source and version to share field types with transform plans.
+  Serialization uses `Field::decode`/`Field::encode`, and tower decomposition
+  uses `Elem::to_components`. The minimum supported Rust version is 1.93.
 - Updated the AArch64 butterfly helpers and README example to use public
   element constructors and raw-value accessors. The standalone AFFT
   comparison project uses the same registry field dependency.
@@ -177,14 +200,9 @@ releases follow [Semantic Versioning](https://semver.org/).
   kernels and the kernel unit tests construct and read `gf8b`/`gf16`
   elements through `Elem::from_raw`/`Elem::to_raw` instead of the tuple
   field, which fgf narrowed to crate visibility. No behavior change.
-- `TransformPlan::derivative_bytes` selects measured source-sweep,
-  overwrite-first, and destination-gather schedules by row geometry and
-  backend. Wide-row Cantor derivatives improved by up to 36%, while short rows
-  retain the lower-overhead sweep.
-- Transform byte walkers execute dimensions of three or fewer as explicit
-  fused base cases instead of per-level recursion, cutting per-call kernel
-  setup roughly fourfold at the bottom of the tree. Measured up to 34%
-  faster on mid-size payloads.
+- `TransformPlan::derivative_into_bytes` selects source-sweep,
+  overwrite-first, or destination-gather execution by row geometry and backend.
+- Transform byte walkers use fused base cases for small dimensions.
 - Fused butterflies gained a unit-coefficient fast path alongside the
   zero-coefficient path: `c = 1` runs as two XOR passes with no field
   multiply.
