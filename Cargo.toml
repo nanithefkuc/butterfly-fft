@@ -45,7 +45,7 @@ simdispatch = { version = "=0.1.0", default-features = false }
 # that compiles the kernels naming them), at the exact release `fgf` resolves
 # so both crates compile one `archmage`.
 archmage = { version = "=0.9.29", optional = true }
-fgf = { version = "=1.1.0", default-features = false }
+fgf = { version = "=1.1.1", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
