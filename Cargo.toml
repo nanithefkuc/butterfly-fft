@@ -9,7 +9,19 @@ license = "MIT"
 readme = "README.md"
 keywords = ["galois", "finite-field", "fft", "ntt", "simd"]
 categories = ["algorithms", "mathematics", "no-std"]
-exclude = ["/.github", "/.plans", "/.lucid", "/.sheaf", "/benchmarks"]
+# Intentional package allowlist: the library source, the declared bench and
+# test targets, and the public doc set. Local tooling state, planning notes,
+# CI definitions, and the competitor benchmark harness never enter
+# `cargo package`.
+include = [
+    "src/**",
+    "benches/**",
+    "tests/**",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/BENCHMARKS.md",
+    "/LICENSE",
+]
 
 [features]
 default = ["std", "simd"]

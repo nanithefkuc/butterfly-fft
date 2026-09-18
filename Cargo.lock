@@ -513,13 +513,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[patch.unused]]
-name = "gfm"
-version = "0.0.0"
+name = "fgf"
+version = "1.1.1"
 
 [[patch.unused]]
 name = "poly-ring"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "fgf"
-version = "1.1.1"
+name = "gfm"
+version = "0.0.0"
