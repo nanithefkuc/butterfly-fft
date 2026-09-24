@@ -35,7 +35,7 @@ same `fgf` release as the library so field types match:
 
 ```toml
 [dependencies]
-butterfly-fft = "=1.0.1"
+butterfly-fft = "=1.0.2"
 fgf = "=1.1.0"
 ```
 
@@ -43,7 +43,7 @@ For portable `no_std` execution, plans and tables still require `alloc`:
 
 ```toml
 [dependencies]
-butterfly-fft = { version = "=1.0.1", default-features = false }
+butterfly-fft = { version = "=1.0.2", default-features = false }
 fgf = { version = "=1.1.0", default-features = false }
 ```
 
