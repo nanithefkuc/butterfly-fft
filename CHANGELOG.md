@@ -7,6 +7,16 @@ releases follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-24
+
+### Changed
+
+- The `fgf` dependency resolves the registry release `=1.2.1`, matching every
+  other consumer in the closure, so one `fgf` and one `FieldKernels` trait
+  compile in a graph that also contains the polynomial crates. The release
+  adds vector broadcast-XOR coverage for the binary fields'
+  `add_assign_scalar`/`sub_assign_scalar`.
+
 ## [1.0.1] - 2026-09-24
 
 ### Changed
