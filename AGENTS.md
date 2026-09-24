@@ -104,15 +104,9 @@ documented once in the umbrella's root `AGENTS.md`. Crate specifics:
   The harness-free `backend_report` test prints the requested override, resolved
   additive backend, and per-field additive and NTT backends. Inspect that report
   when deciding which paths the host actually exercised.
-- **`MIRI = --no-default-features`.** The `no_std` + `alloc` closure is what
-  miri can execute, and the run covers the safe wrappers over `src/kernel`
-  — walker geometry, scratch sizing, and the checked byte-row
-  kernel tests. Superlinear test sweeps and large transform magnitudes
-  shrink under `cfg!(miri)` (see the `log_cap` / `max_log` / `max_dimension`
-  helpers and the geometry lists in `tests/zero_alloc.rs`): miri validates
-  geometry and safety, not throughput, and every boundary class —
-  multi-element rows, partial-element tails, awkward truncations — stays
-  represented at the smaller sizes.
+- **`MIRI` is empty.** The library forbids unsafe. The no-default scalar
+  interpreter path is ordinary checked-code coverage, not owned-unsafe Miri
+  coverage.
 - **`COV_IGNORE` is empty.** GFNI source is not excluded from coverage.
   Direct-kernel differential tests run when the host can summon the required
   token; unsupported hosts skip those kernels. A passing run does not imply
