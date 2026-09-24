@@ -73,16 +73,17 @@ features:
 msrv:
     cargo +{{MSRV}} check --all-features --all-targets
 
-# Crates that forbid unsafe have no `MIRI` args and skip; kernel owners list
-# one `cargo miri test` argument set per line in `crate.just`.
+# A crate leaves `MIRI` empty when it lists no owned-unsafe Miri targets. Each
+# target must execute at least one crate-owned unsafe item; non-empty argument
+# sets live in that crate's `crate.just`.
 #
-# Miri over the scalar paths.
+# Miri over the listed owned-unsafe paths.
 [group('test')]
 unsafe-check:
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ -z "{{MIRI}}" ]]; then
-        echo "{{CRATE}} declares no unsafe surface; nothing for miri to check"
+        echo "{{CRATE}} lists no Miri targets"
         exit 0
     fi
     while IFS= read -r args; do
@@ -333,10 +334,10 @@ doctor:
     check "jq (perf-bench)"     jq --version
     check "perf (perf-bench)"   perf --version
     check "taskset (bench pinning)" taskset --version
-    if [[ -n "{{MIRI}}" ]]; then
+    if [[ -n "{{MIRI}}" ]] || grep -qE '^MIRI_[A-Z_]+[[:space:]]*:=' crate.just; then
         check "nightly miri"    cargo +nightly miri --version
     else
-        printf '  n/a     nightly miri (crate forbids unsafe)\n'
+        printf '  n/a     nightly miri (no Miri targets listed)\n'
     fi
     if [[ -n "${FEC_GOLDEN_CORE:-}" ]]; then
         printf '  ok      FEC_GOLDEN_CORE=%s\n' "${FEC_GOLDEN_CORE}"
