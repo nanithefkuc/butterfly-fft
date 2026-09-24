@@ -10,9 +10,8 @@ MSRV := '1.93'
 # per process. Empty means the crate owns no dispatch surface.
 TIERS := if arch() == 'aarch64' { 'neon_aes neon scalar' } else if arch() == 'x86_64' { 'v3_gfni_crypto v3 v2 scalar' } else if arch() == 'x86' { 'v3_gfni_crypto v3 v2 scalar' } else { 'scalar' }
 
-# `cargo miri test` argument sets, one per line. Empty when the crate declares
-# no unsafe surface, in which case `just unsafe-check` reports and skips.
-MIRI := '--no-default-features'
+# This crate owns no library unsafe; no Miri target is listed.
+MIRI := ''
 
 # Coverage exclusions for code that cannot execute on a CI host. Empty means
 # every line of the crate counts.
