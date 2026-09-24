@@ -1,6 +1,6 @@
 [package]
 name = "butterfly-fft"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.93"
 description = "Additive FFT and NTT transform plans over finite fields"
