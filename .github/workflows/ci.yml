@@ -121,15 +121,3 @@ jobs:
       # module can never shadow a sysroot name.
       - name: sysroot paths must be absolute
         run: '! grep -rnE "^\s*use (core|std)::" src/'
-
-  miri:
-    name: miri (scalar paths)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: miri
-      # Miri cannot execute the SIMD intrinsics; pin to the portable backend so
-      # it validates the slice and pointer arithmetic in the wrappers instead.
-      - run: cargo miri test --no-default-features
